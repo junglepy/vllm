@@ -1561,6 +1561,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "Qwen/Qwen3.5-35B-A3B",
         speculative_model="Qwen/Qwen3.5-35B-A3B",
     ),
+    "Qwen3_5LatentMTP": _HfExamplesInfo(
+        "Qwen/Qwen3.5-0.8B",
+        speculative_model="Qwen/Qwen3.5-0.8B",
+        is_available_online=False,
+    ),
     "Step3p5MTP": _HfExamplesInfo(
         "stepfun-ai/Step-3.5-Flash",
         speculative_model="stepfun-ai/Step-3.5-Flash",

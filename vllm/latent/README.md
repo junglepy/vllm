@@ -40,9 +40,11 @@ The JSON output includes `total_steps_per_s`, `latent_steps_per_s`, and
 latent mode because latent steps advance the KV cache but are intentionally not
 detokenized.
 
-Current limitation: the first integration point is a named vLLM runtime module and
-CLI. It does not yet use the production paged-attention scheduler, because vLLM's
-request scheduler assumes every decode slot corresponds to a request-owned token
-id, while this latent mode advances the target KV cache with continuous internal
-embeddings. The module is structured so the model-side latent head can be moved
-into the vLLM GPU model runner without changing checkpoint semantics.
+Current limitation: the first runnable entry point is a named vLLM runtime module
+and CLI. The model-side head is also registered as the
+`Qwen3_5LatentMTP` vLLM model-executor architecture, with checkpoint-key remapping
+for latent-mimo `core.*` / `to_embed.*` weights. The remaining integration step is
+the production scheduler loop: vLLM's request scheduler assumes every decode slot
+corresponds to a request-owned token id, while latent mode advances the target KV
+cache with continuous internal embeddings that must not be surfaced as output
+tokens.
