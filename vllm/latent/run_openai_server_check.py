@@ -117,6 +117,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompts-jsonl", type=Path)
     parser.add_argument("--limit", type=int, default=2)
     parser.add_argument(
+        "--api-server-arg",
+        action="append",
+        default=[],
+        help="Additional raw argument to append to vllm.entrypoints.openai.api_server. "
+        "Repeat for multiple arguments. If the forwarded argument starts with "
+        "`--`, pass it with equals, for example "
+        "`--api-server-arg=--async-scheduling`.",
+    )
+    parser.add_argument(
         "--skip-base",
         action="store_true",
         help="Only check the latent alias. By default both base and latent "
@@ -209,6 +218,7 @@ def main() -> int:
         str(args.max_num_seqs),
         "--gpu-memory-utilization",
         str(args.gpu_memory_utilization),
+        *args.api_server_arg,
     ]
     env = os.environ.copy()
     env.setdefault("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS", "1")
