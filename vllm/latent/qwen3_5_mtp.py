@@ -223,7 +223,9 @@ def _chat_input_ids(
         enable_thinking=enable_thinking,
         return_tensors="pt",
     )
-    if isinstance(rendered, dict):
+    if hasattr(rendered, "input_ids"):
+        input_ids = rendered.input_ids
+    elif isinstance(rendered, dict):
         input_ids = rendered["input_ids"]
     else:
         input_ids = rendered
@@ -315,7 +317,7 @@ class Qwen35LatentMTPRuntime:
         hidden_last = hidden[:, -1:, :]
         logits_last = self.model.lm_head(hidden_last)[:, -1, :]
 
-        mtp_cache = DynamicCache(config=self.text_backbone.config)
+        mtp_cache = DynamicCache(config=self.latent_head.core.config)
         cache_pos = torch.arange(input_ids.shape[1], device=self.device)
         _ = self.latent_head.core(
             input_ids=input_ids,
