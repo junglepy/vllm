@@ -1,9 +1,12 @@
 # Latent-MTP интеграция в vLLM: разбор замедления и план оптимизации
 
-**Дата:** 2026-05-06 (обновлено под актуальное состояние fork с локальными несокоммиченными правками)
+**Дата:** 2026-05-06
 **Контекст:** fork `junglepy/vllm`, ветка `feature/latent-mtp-integration`
-**HEAD коммит:** `644f803 Add Qwen latent model aliases`
-**Локальные правки** (не запушены): +530 строк в `gpu_model_runner.py`, +58 в `qwen3_5_latent_mtp.py` — подключение native MTP-головы и батчирование MTP forward.
+**Актуальное состояние:** native MTP head, batched MTP forward,
+OpenAI-compatible latent model aliases, native `reasoning_tokens` accounting и
+backend registry уже закоммичены. Док `NATIVE_REASONING_DESIGN.md` фиксирует
+границу: public API переиспользует vLLM reasoning, execution backend заменяет
+только next-step token embedding на continuous MTP embedding.
 
 ## Что уже сделано хорошо
 
@@ -13,6 +16,9 @@
 - **MTP-голова батчируется**: `_run_latent_qwen35_native_head` делает **один forward** для всех latent-активных запросов в текущем decode-step (вместо N forward'ов batch=1).
 - **PagedAttention для MTP cache**: новая реализация строит `CommonAttentionMetadata` с `slot_mapping`, `block_table`, `query_start_loc` — то есть MTP-голова использует тот же attention backend, что и основная модель, через `vllm.v1.attention`. Никаких HF `DynamicCache` в hot path.
 - **Standalone HF-голова осталась как fallback** (`_compute_latent_qwen35_next_embed`, `_advance_latent_qwen35_mtp_cache`), но не основной путь когда native head доступен.
+- **Native pending state упрощён**: redundant Python dict для pending latent
+  embeddings убран из native path; используются preallocated pending arrays и
+  счётчик pending entries.
 
 То есть пункты «batch=1 forward», «standalone HF head», «отдельный DynamicCache» из предыдущей ревизии этого документа — **закрыты**.
 

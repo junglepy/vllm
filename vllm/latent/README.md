@@ -1,6 +1,10 @@
 # Qwen3.5 latent-MTP vLLM runtime
 
 This fork adds a vLLM V1 decode path for latent-mimo Qwen3.5 checkpoints.
+Publicly, latent-MTP is exposed as a native reasoning backend: HTTP clients use
+ordinary model aliases and native reasoning usage fields. The special handling
+is only in the execution path, where internal reasoning steps feed a continuous
+MTP embedding into the next decode position instead of `embed_tokens(input_id)`.
 
 Runtime semantics:
 
@@ -155,6 +159,10 @@ Known constraints in this branch:
 - direct Python `LLM.generate()` calls still enable latent mode through
   `SamplingParams.extra_args["latent_reasoning"]`; the OpenAI-compatible server
   avoids request-side `extra_args` by using latent model aliases.
+
+See `NATIVE_REASONING_DESIGN.md` for the intended native integration boundary:
+vLLM reasoning APIs own public protocol/accounting, while latent backends own
+the next-step embedding transition.
 
 Smoke result on B200 with `checkpoint_step5500_NEW.pt`, compiled vLLM path,
 `max_model_len=512`, `async_scheduling=False`:

@@ -721,9 +721,7 @@ class GPUModelRunner(
         self.latent_qwen35_embeds_by_req_pos: dict[
             tuple[str, int], torch.Tensor
         ] = {}
-        self.latent_qwen35_pending_by_req_pos: dict[
-            tuple[str, int], tuple[int, torch.Tensor, str]
-        ] = {}
+        self.latent_qwen35_num_pending = 0
         self.latent_qwen35_pending_req_ids: list[str | None] = [
             None
         ] * self.max_num_reqs
@@ -1120,14 +1118,15 @@ class GPUModelRunner(
             for key in list(self.latent_qwen35_embeds_by_req_pos):
                 if key[0] == req_id:
                     self.latent_qwen35_embeds_by_req_pos.pop(key, None)
-            for key in list(self.latent_qwen35_pending_by_req_pos):
-                if key[0] == req_id:
-                    self.latent_qwen35_pending_by_req_pos.pop(key, None)
             for req_idx, pending_req_id in enumerate(
                 self.latent_qwen35_pending_req_ids
             ):
                 if pending_req_id == req_id:
                     self.latent_qwen35_pending_req_ids[req_idx] = None
+                    self.latent_qwen35_num_pending = max(
+                        0,
+                        self.latent_qwen35_num_pending - 1,
+                    )
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -1841,7 +1840,7 @@ class GPUModelRunner(
         profile_entries = 0
         if (
             self.latent_qwen35_native_head is None
-            or not self.latent_qwen35_pending_by_req_pos
+            or self.latent_qwen35_num_pending <= 0
             or self.latent_qwen35_last_req_indices_np is None
             or self.latent_qwen35_last_positions_np is None
             or not isinstance(slot_mappings, dict)
@@ -1915,10 +1914,11 @@ class GPUModelRunner(
                 embeds.to(device=self.device, dtype=self.dtype)
             )
             for req_idx in range(total_num_scheduled_tokens):
-                req_id = self.input_batch.req_ids[req_idx]
-                pos = int(pending_positions[req_idx])
                 self.latent_qwen35_pending_req_ids[req_idx] = None
-                self.latent_qwen35_pending_by_req_pos.pop((req_id, pos), None)
+            self.latent_qwen35_num_pending = max(
+                0,
+                self.latent_qwen35_num_pending - total_num_scheduled_tokens,
+            )
             self.latent_qwen35_use_inputs_embeds = True
             if profile_path:
                 with open(profile_path, "a") as f:
@@ -2043,10 +2043,12 @@ class GPUModelRunner(
             self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(token_embeds)
             self.inputs_embeds.gpu[scheduled_slots] = embeds
         for item in entries:
-            req_idx, _slot, pos, _token_id, _prev_hidden = item
-            req_id = self.input_batch.req_ids[req_idx]
+            req_idx, _slot, _pos, _token_id, _prev_hidden = item
             self.latent_qwen35_pending_req_ids[req_idx] = None
-            self.latent_qwen35_pending_by_req_pos.pop((req_id, pos), None)
+        self.latent_qwen35_num_pending = max(
+            0,
+            self.latent_qwen35_num_pending - len(entries),
+        )
         self.latent_qwen35_use_inputs_embeds = True
         if profile_path:
             with open(profile_path, "a") as f:
@@ -2109,11 +2111,12 @@ class GPUModelRunner(
                 and pos in req_state.latent_qwen35_internal_positions
             ):
                 continue
-            if (
-                not req_state.latent_qwen35_active
-                and (req_id, int(self.input_batch.num_tokens_no_spec[req_idx]))
-                not in self.latent_qwen35_pending_by_req_pos
-            ):
+            has_pending = (
+                self.latent_qwen35_pending_req_ids[req_idx] == req_id
+                and int(self.latent_qwen35_pending_positions_np[req_idx])
+                == int(self.input_batch.num_tokens_no_spec[req_idx])
+            )
+            if not req_state.latent_qwen35_active and not has_pending:
                 continue
             entries.append((req_idx, slot, pos))
 
@@ -4403,11 +4406,8 @@ class GPUModelRunner(
                     )
                     is not None
                 ):
-                    self.latent_qwen35_pending_by_req_pos[(req_id, start_idx)] = (
-                        token_id,
-                        sample_hidden_states[req_idx].detach(),
-                        checkpoint,
-                    )
+                    if self.latent_qwen35_pending_req_ids[req_idx] is None:
+                        self.latent_qwen35_num_pending += 1
                     self.latent_qwen35_pending_req_ids[req_idx] = req_id
                     self.latent_qwen35_pending_token_ids_np[req_idx] = token_id
                     self.latent_qwen35_pending_positions_np[req_idx] = start_idx
