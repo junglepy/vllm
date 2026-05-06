@@ -116,8 +116,61 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wait-timeout-s", type=float, default=600.0)
     parser.add_argument("--prompts-jsonl", type=Path)
     parser.add_argument("--limit", type=int, default=2)
+    parser.add_argument(
+        "--skip-base",
+        action="store_true",
+        help="Only check the latent alias. By default both base and latent "
+        "aliases are exercised through the HTTP API.",
+    )
     parser.add_argument("--out-dir", type=Path, required=True)
     return parser.parse_args()
+
+
+def _run_chat(
+    *,
+    base_url: str,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+) -> tuple[dict[str, Any], float]:
+    req_started = time.monotonic()
+    response = _http_json(
+        "POST",
+        f"{base_url}/v1/chat/completions",
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": max_tokens,
+        },
+        timeout=300.0,
+    )
+    return response, time.monotonic() - req_started
+
+
+def _row_from_response(
+    *,
+    index: int,
+    model: str,
+    mode: str,
+    prompt: str,
+    response: dict[str, Any],
+    elapsed_s: float,
+) -> dict[str, Any]:
+    usage = response.get("usage") or {}
+    details = usage.get("completion_tokens_details") or {}
+    reasoning_tokens = int(details.get("reasoning_tokens") or 0)
+    content = response.get("choices", [{}])[0].get("message", {}).get("content")
+    return {
+        "index": index,
+        "mode": mode,
+        "model": model,
+        "prompt": prompt,
+        "content": content,
+        "usage": usage,
+        "reasoning_tokens": reasoning_tokens,
+        "elapsed_s": elapsed_s,
+    }
 
 
 def main() -> int:
@@ -175,6 +228,10 @@ def main() -> int:
             models = _http_json("GET", f"{base_url}/v1/models")
             models_path.write_text(json.dumps(models, indent=2) + "\n")
             model_ids = {item["id"] for item in models.get("data", [])}
+            if args.base_alias not in model_ids:
+                raise RuntimeError(
+                    f"Base alias {args.base_alias!r} not listed in /v1/models."
+                )
             if args.latent_alias not in model_ids:
                 raise RuntimeError(
                     f"Latent alias {args.latent_alias!r} not listed in /v1/models."
@@ -184,52 +241,69 @@ def main() -> int:
             rows: list[dict[str, Any]] = []
             with predictions_path.open("w") as out_f:
                 for idx, prompt in enumerate(prompts):
-                    req_started = time.monotonic()
-                    response = _http_json(
-                        "POST",
-                        f"{base_url}/v1/chat/completions",
-                        {
-                            "model": args.latent_alias,
-                            "messages": [{"role": "user", "content": prompt}],
-                            "temperature": 0,
-                            "max_tokens": args.max_tokens,
-                        },
-                        timeout=300.0,
+                    if not args.skip_base:
+                        base_response, base_elapsed = _run_chat(
+                            base_url=base_url,
+                            model=args.base_alias,
+                            prompt=prompt,
+                            max_tokens=args.max_tokens,
+                        )
+                        base_row = _row_from_response(
+                            index=idx,
+                            model=args.base_alias,
+                            mode="base",
+                            prompt=prompt,
+                            response=base_response,
+                            elapsed_s=base_elapsed,
+                        )
+                        rows.append(base_row)
+                        out_f.write(json.dumps(base_row, ensure_ascii=False) + "\n")
+                        out_f.flush()
+
+                    latent_response, latent_elapsed = _run_chat(
+                        base_url=base_url,
+                        model=args.latent_alias,
+                        prompt=prompt,
+                        max_tokens=args.max_tokens,
                     )
-                    elapsed = time.monotonic() - req_started
-                    usage = response.get("usage") or {}
-                    details = usage.get("completion_tokens_details") or {}
-                    reasoning_tokens = int(details.get("reasoning_tokens") or 0)
-                    content = (
-                        response.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content")
+                    latent_row = _row_from_response(
+                        index=idx,
+                        model=args.latent_alias,
+                        mode="latent",
+                        prompt=prompt,
+                        response=latent_response,
+                        elapsed_s=latent_elapsed,
                     )
-                    row = {
-                        "index": idx,
-                        "prompt": prompt,
-                        "content": content,
-                        "usage": usage,
-                        "reasoning_tokens": reasoning_tokens,
-                        "elapsed_s": elapsed,
-                    }
-                    rows.append(row)
-                    out_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    rows.append(latent_row)
+                    out_f.write(json.dumps(latent_row, ensure_ascii=False) + "\n")
                     out_f.flush()
-                    if reasoning_tokens <= 0:
+                    if latent_row["reasoning_tokens"] <= 0:
                         raise RuntimeError(
                             "Latent request returned zero reasoning_tokens; "
-                            f"row={idx}, usage={usage}"
+                            f"row={idx}, usage={latent_row['usage']}"
                         )
 
             elapsed_total = time.monotonic() - started_at
+            latent_rows = [row for row in rows if row["mode"] == "latent"]
+            base_rows = [row for row in rows if row["mode"] == "base"]
             summary = {
-                "num_prompts": len(rows),
+                "num_prompts": len(prompts),
+                "num_rows": len(rows),
+                "num_base_rows": len(base_rows),
+                "num_latent_rows": len(latent_rows),
                 "elapsed_s": elapsed_total,
-                "mean_reasoning_tokens": sum(r["reasoning_tokens"] for r in rows)
-                / max(1, len(rows)),
-                "mean_request_elapsed_s": sum(r["elapsed_s"] for r in rows)
-                / max(1, len(rows)),
+                "mean_latent_reasoning_tokens": sum(
+                    r["reasoning_tokens"] for r in latent_rows
+                )
+                / max(1, len(latent_rows)),
+                "mean_latent_request_elapsed_s": sum(
+                    r["elapsed_s"] for r in latent_rows
+                )
+                / max(1, len(latent_rows)),
+                "mean_base_request_elapsed_s": sum(
+                    r["elapsed_s"] for r in base_rows
+                )
+                / max(1, len(base_rows)),
                 "latent_alias": args.latent_alias,
                 "base_alias": args.base_alias,
                 "checkpoint": module["path"],
