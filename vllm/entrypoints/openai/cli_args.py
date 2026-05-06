@@ -26,6 +26,7 @@ from vllm.entrypoints.constants import (
 )
 from vllm.entrypoints.openai.models.protocol import (
     LatentQwen35ModulePath,
+    LatentReasoningModulePath,
     LoRAModulePath,
 )
 from vllm.logger import init_logger
@@ -105,6 +106,42 @@ class LatentQwen35ParserAction(argparse.Action):
         setattr(namespace, self.dest, modules)
 
 
+class LatentReasoningParserAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[str] | None,
+        option_string: str | None = None,
+    ):
+        if values is None:
+            values = []
+        if isinstance(values, str):
+            raise TypeError("Expected values to be a list")
+
+        modules: list[LatentReasoningModulePath] = []
+        for item in values:
+            if item in [None, ""]:
+                continue
+            if "=" in item and "," not in item:
+                name, path = item.split("=", 1)
+                modules.append(LatentReasoningModulePath(name=name, path=path))
+            else:
+                try:
+                    data = json.loads(item)
+                    modules.append(LatentReasoningModulePath(**data))
+                except json.JSONDecodeError:
+                    parser.error(
+                        f"Invalid JSON format for --latent-reasoning-modules: {item}"
+                    )
+                except TypeError as e:
+                    parser.error(
+                        "Invalid fields for --latent-reasoning-modules: "
+                        f"{item} - {str(e)}"
+                    )
+        setattr(namespace, self.dest, modules)
+
+
 @config
 class BaseFrontendArgs:
     """Base arguments for the OpenAI-compatible frontend server.
@@ -120,10 +157,16 @@ class BaseFrontendArgs:
     format): `{\"name\": \"name\", \"path\": \"lora_path\",
     \"base_model_name\": \"id\"}`"""
     latent_qwen35_modules: list[LatentQwen35ModulePath] | None = None
-    """Qwen3.5 latent-head aliases in either 'name=checkpoint.pt' format or
+    """Deprecated alias for --latent-reasoning-modules with backend=qwen35_mtp.
+    Qwen3.5 latent-head aliases in either 'name=checkpoint.pt' format or
     JSON format. Example:
     `{\"name\":\"qwen35-latent-step5500\",\"path\":\"/ckpts/step5500.pt\",
     \"max_internal_tokens\":1200}`."""
+    latent_reasoning_modules: list[LatentReasoningModulePath] | None = None
+    """Latent reasoning aliases in either 'name=checkpoint.pt' format or JSON
+    format. Example:
+    `{\"name\":\"qwen35-latent-step5500\",\"path\":\"/ckpts/step5500.pt\",
+    \"backend\":\"qwen35_mtp\",\"max_internal_tokens\":1200}`."""
     chat_template: str | None = None
     """The file path to the chat template, or the template in single-line form
     for the specified model."""
@@ -222,6 +265,11 @@ class BaseFrontendArgs:
         frontend_kwargs["latent_qwen35_modules"]["type"] = optional_type(str)
         frontend_kwargs["latent_qwen35_modules"]["action"] = (
             LatentQwen35ParserAction
+        )
+
+        frontend_kwargs["latent_reasoning_modules"]["type"] = optional_type(str)
+        frontend_kwargs["latent_reasoning_modules"]["action"] = (
+            LatentReasoningParserAction
         )
 
         # Special case: Tool call parser shows built-in options.

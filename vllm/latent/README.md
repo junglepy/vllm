@@ -15,7 +15,11 @@ Runtime semantics:
 5. when `</think>` is sampled, generation switches back to normal visible token
    generation.
 
-The vLLM integration uses `SamplingParams.extra_args["latent_qwen35"]`:
+The offline Python integration still uses `SamplingParams.extra_args`, but the
+preferred key is now the backend-agnostic
+`SamplingParams.extra_args["latent_reasoning"]`. The older
+`SamplingParams.extra_args["latent_qwen35"]` key remains accepted for backward
+compatibility.
 
 ```python
 from transformers import AutoTokenizer
@@ -42,7 +46,8 @@ params = SamplingParams(
     temperature=0.0,
     max_tokens=64,
     extra_args={
-        "latent_qwen35": {
+        "latent_reasoning": {
+            "backend": "qwen35_mtp",
             "checkpoint": checkpoint,
             "think_close_token_id": 248069,
             "max_internal_tokens": 1200,
@@ -64,7 +69,8 @@ for checkpoint in [step1500, step5500]:
         temperature=0.0,
         max_tokens=64,
         extra_args={
-            "latent_qwen35": {
+            "latent_reasoning": {
+                "backend": "qwen35_mtp",
                 "checkpoint": checkpoint,
                 "think_close_token_id": 248069,
                 "max_internal_tokens": 1200,
@@ -79,8 +85,8 @@ OpenAI-compatible server aliases:
 ```bash
 vllm serve /workspace/latent-mimo/qwen35_27b_tests/models/Qwen3.5-27B \
   --served-model-name qwen35-27b-base \
-  --latent-qwen35-modules qwen35-27b-latent-step1500=/workspace/latent-mimo/deploy_archives/checkpoint_step1500_NEW.pt \
-  --latent-qwen35-modules '{"name":"qwen35-27b-latent-step5500","path":"/workspace/latent-mimo/deploy_archives/checkpoint_step5500_NEW.pt","max_internal_tokens":1200}'
+  --latent-reasoning-modules qwen35-27b-latent-step1500=/workspace/latent-mimo/deploy_archives/checkpoint_step1500_NEW.pt \
+  --latent-reasoning-modules '{"name":"qwen35-27b-latent-step5500","path":"/workspace/latent-mimo/deploy_archives/checkpoint_step5500_NEW.pt","backend":"qwen35_mtp","max_internal_tokens":1200}'
 ```
 
 Then clients can choose the execution mode via the standard `model` field:
@@ -91,8 +97,10 @@ Then clients can choose the execution mode via the standard `model` field:
 ```
 
 The base alias uses ordinary vLLM decoding. A latent alias injects
-`SamplingParams.extra_args["latent_qwen35"]` before scheduling the request.
-When `--latent-qwen35-modules` is provided, the OpenAI-compatible server sets
+`SamplingParams.extra_args["latent_reasoning"]` before scheduling the request.
+`--latent-qwen35-modules` remains accepted as a deprecated alias for
+`--latent-reasoning-modules` with `backend="qwen35_mtp"`.
+When a latent reasoning module is provided, the OpenAI-compatible server sets
 `LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS=1` by default unless the operator already
 set it explicitly, and forces `async_scheduling=False` for correctness with the
 current worker-side latent bookkeeping.
@@ -145,8 +153,8 @@ Known constraints in this branch:
 - `max_internal_tokens` is enforced separately from vLLM `max_tokens`, because
   vLLM `max_tokens` counts visible output tokens only.
 - direct Python `LLM.generate()` calls still enable latent mode through
-  `SamplingParams.extra_args["latent_qwen35"]`; the OpenAI-compatible server can
-  avoid request-side `extra_args` by using latent model aliases.
+  `SamplingParams.extra_args["latent_reasoning"]`; the OpenAI-compatible server
+  avoids request-side `extra_args` by using latent model aliases.
 
 Smoke result on B200 with `checkpoint_step5500_NEW.pt`, compiled vLLM path,
 `max_model_len=512`, `async_scheduling=False`:

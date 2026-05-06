@@ -8,6 +8,7 @@ import pytest
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.models.protocol import (
     LatentQwen35ModulePath,
+    LatentReasoningModulePath,
     LoRAModulePath,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -161,6 +162,41 @@ def test_latent_qwen35_json_format(serve_parser):
     )
     assert args.latent_qwen35_modules == [
         LatentQwen35ModulePath(**module)
+    ]
+
+
+def test_latent_reasoning_key_value_format(serve_parser):
+    args = serve_parser.parse_args(
+        [
+            "--latent-reasoning-modules",
+            "latent-step5500=/path/to/step5500.pt",
+        ]
+    )
+    assert args.latent_reasoning_modules == [
+        LatentReasoningModulePath(
+            name="latent-step5500",
+            path="/path/to/step5500.pt",
+        )
+    ]
+
+
+def test_latent_reasoning_json_format(serve_parser):
+    module = {
+        "name": "latent-step5500",
+        "path": "/path/to/step5500.pt",
+        "base_model_name": "qwen35-base",
+        "backend": "qwen35_mtp",
+        "think_close_token_id": 248069,
+        "max_internal_tokens": 3000,
+    }
+    args = serve_parser.parse_args(
+        [
+            "--latent-reasoning-modules",
+            json.dumps(module),
+        ]
+    )
+    assert args.latent_reasoning_modules == [
+        LatentReasoningModulePath(**module)
     ]
 
 

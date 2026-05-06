@@ -480,20 +480,26 @@ class OpenAIServing:
         request: AnyRequest,
         params: SamplingParams | BeamSearchParams,
     ) -> SamplingParams | BeamSearchParams:
-        latent_cfg = self.models.latent_qwen35_extra_args(request.model)
+        latent_cfg = self.models.latent_reasoning_extra_args(request.model)
         if latent_cfg is None:
             return params
         if isinstance(params, BeamSearchParams):
-            raise ValueError("Qwen3.5 latent aliases do not support beam search.")
+            raise ValueError("Latent reasoning aliases do not support beam search.")
 
         extra_args = dict(params.extra_args or {})
-        existing = extra_args.get("latent_qwen35")
+        existing = extra_args.get("latent_reasoning")
         if existing is not None and existing != latent_cfg:
+            raise ValueError(
+                "Request vllm_xargs already contains latent_reasoning that conflicts "
+                f"with model alias {request.model}."
+            )
+        legacy_existing = extra_args.get("latent_qwen35")
+        if legacy_existing is not None and legacy_existing != latent_cfg:
             raise ValueError(
                 "Request vllm_xargs already contains latent_qwen35 that conflicts "
                 f"with model alias {request.model}."
             )
-        extra_args["latent_qwen35"] = dict(latent_cfg)
+        extra_args["latent_reasoning"] = dict(latent_cfg)
         params.extra_args = extra_args
         return params
 
@@ -771,9 +777,9 @@ class OpenAIServing:
     def _is_model_supported(self, model_name: str | None) -> bool:
         if not model_name:
             return True
-        return self.models.is_base_model(model_name) or self.models.is_latent_qwen35_model(
+        return self.models.is_base_model(
             model_name
-        )
+        ) or self.models.is_latent_reasoning_model(model_name)
 
 
 def clamp_prompt_logprobs(

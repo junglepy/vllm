@@ -1223,27 +1223,16 @@ class GPUModelRunner(
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
-            if sampling_params and sampling_params.extra_args:
-                latent_cfg = sampling_params.extra_args.get("latent_qwen35")
-                if latent_cfg:
-                    if not isinstance(latent_cfg, dict):
-                        raise ValueError(
-                            "SamplingParams.extra_args['latent_qwen35'] must be "
-                            "a dict with a 'checkpoint' path."
-                        )
-                    if not latent_cfg.get("checkpoint"):
-                        raise ValueError(
-                            "SamplingParams.extra_args['latent_qwen35'] must include "
-                            "a non-empty 'checkpoint' path."
-                        )
-                    req_state.latent_qwen35_active = True
-                    req_state.latent_qwen35_internal_positions = set()
-                    req_state.latent_qwen35_think_close_token_id = int(
-                        latent_cfg.get("think_close_token_id", 248069)
-                    )
-                    req_state.latent_qwen35_max_internal_tokens = int(
-                        latent_cfg.get("max_internal_tokens", 1200)
-                    )
+            latent_cfg = self._get_latent_qwen35_config(sampling_params)
+            if latent_cfg:
+                req_state.latent_qwen35_active = True
+                req_state.latent_qwen35_internal_positions = set()
+                req_state.latent_qwen35_think_close_token_id = int(
+                    latent_cfg.get("think_close_token_id", 248069)
+                )
+                req_state.latent_qwen35_max_internal_tokens = int(
+                    latent_cfg.get("max_internal_tokens", 1200)
+                )
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
@@ -2214,24 +2203,42 @@ class GPUModelRunner(
                     + "\n"
                 )
 
-    def _get_latent_qwen35_checkpoint(self, sampling_params: SamplingParams) -> str | None:
-        if not sampling_params.extra_args:
+    def _get_latent_qwen35_config(
+        self,
+        sampling_params: SamplingParams | None,
+    ) -> dict[str, object] | None:
+        if sampling_params is None or not sampling_params.extra_args:
             return None
-        latent_cfg = sampling_params.extra_args.get("latent_qwen35")
+        latent_cfg = sampling_params.extra_args.get("latent_reasoning")
+        if latent_cfg is None:
+            latent_cfg = sampling_params.extra_args.get("latent_qwen35")
         if isinstance(latent_cfg, dict):
+            backend = latent_cfg.get("backend", "qwen35_mtp")
+            if backend != "qwen35_mtp":
+                raise ValueError(
+                    "SamplingParams.extra_args['latent_reasoning'] currently "
+                    f"supports backend='qwen35_mtp', got {backend!r}."
+                )
             checkpoint = latent_cfg.get("checkpoint")
             if not checkpoint:
                 raise ValueError(
-                    "SamplingParams.extra_args['latent_qwen35'] must include "
+                    "SamplingParams.extra_args['latent_reasoning'] must include "
                     "a non-empty 'checkpoint' path."
                 )
-            return str(Path(str(checkpoint)).expanduser().resolve())
+            return latent_cfg
         if latent_cfg:
             raise ValueError(
-                "SamplingParams.extra_args['latent_qwen35'] must be a dict with "
+                "SamplingParams.extra_args['latent_reasoning'] must be a dict with "
                 "a 'checkpoint' path."
             )
         return None
+
+    def _get_latent_qwen35_checkpoint(self, sampling_params: SamplingParams) -> str | None:
+        latent_cfg = self._get_latent_qwen35_config(sampling_params)
+        if latent_cfg is None:
+            return None
+        checkpoint = latent_cfg["checkpoint"]
+        return str(Path(str(checkpoint)).expanduser().resolve())
 
     def _maybe_init_latent_qwen35_native_head(self) -> None:
         hf_config = self.model_config.hf_text_config

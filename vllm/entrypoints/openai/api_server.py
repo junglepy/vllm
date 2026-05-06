@@ -363,7 +363,8 @@ async def init_app_state(
         engine_client=engine_client,
         base_model_paths=base_model_paths,
         lora_modules=lora_modules,
-        latent_qwen35_modules=args.latent_qwen35_modules,
+        latent_reasoning_modules=getattr(args, "latent_reasoning_modules", None),
+        latent_qwen35_modules=getattr(args, "latent_qwen35_modules", None),
     )
     await state.openai_serving_models.init_static_loras()
 
@@ -454,7 +455,8 @@ async def init_render_app_state(
             BaseModelPath(name=name, model_path=args.model)
             for name in served_model_names
         ],
-        latent_qwen35_modules=args.latent_qwen35_modules,
+        latent_reasoning_modules=getattr(args, "latent_reasoning_modules", None),
+        latent_qwen35_modules=getattr(args, "latent_qwen35_modules", None),
     )
 
     if args.enable_log_requests:
@@ -681,7 +683,10 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
 
 def _enable_latent_qwen35_defaults(args: Namespace) -> None:
-    if getattr(args, "latent_qwen35_modules", None):
+    if (
+        getattr(args, "latent_reasoning_modules", None)
+        or getattr(args, "latent_qwen35_modules", None)
+    ):
         os.environ.setdefault("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS", "1")
         # The current Qwen latent path mutates worker-side request state during
         # decode bookkeeping, so keep the server on the synchronous scheduler
