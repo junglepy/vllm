@@ -149,6 +149,10 @@ class RequestOutput:
 
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
+        self.latent_internal_token_count = max(
+            self.latent_internal_token_count,
+            next_output.latent_internal_token_count,
+        )
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):

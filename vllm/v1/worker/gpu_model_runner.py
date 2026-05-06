@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -718,6 +719,7 @@ class GPUModelRunner(
             tuple[str, int], torch.Tensor
         ] = {}
         self.latent_qwen35_head: torch.nn.Module | None = None
+        self.latent_qwen35_checkpoint: str | None = None
         self.latent_qwen35_mtp_caches: dict[str, object] = {}
         self.latent_qwen35_use_inputs_embeds = False
         self.discard_request_mask = self._make_buffer(
@@ -1181,15 +1183,24 @@ class GPUModelRunner(
             if sampling_params and sampling_params.extra_args:
                 latent_cfg = sampling_params.extra_args.get("latent_qwen35")
                 if latent_cfg:
+                    if not isinstance(latent_cfg, dict):
+                        raise ValueError(
+                            "SamplingParams.extra_args['latent_qwen35'] must be "
+                            "a dict with a 'checkpoint' path."
+                        )
+                    if not latent_cfg.get("checkpoint"):
+                        raise ValueError(
+                            "SamplingParams.extra_args['latent_qwen35'] must include "
+                            "a non-empty 'checkpoint' path."
+                        )
                     req_state.latent_qwen35_active = True
                     req_state.latent_qwen35_internal_positions = set()
-                    if isinstance(latent_cfg, dict):
-                        req_state.latent_qwen35_think_close_token_id = int(
-                            latent_cfg.get("think_close_token_id", 248069)
-                        )
-                        req_state.latent_qwen35_max_internal_tokens = int(
-                            latent_cfg.get("max_internal_tokens", 1200)
-                        )
+                    req_state.latent_qwen35_think_close_token_id = int(
+                        latent_cfg.get("think_close_token_id", 248069)
+                    )
+                    req_state.latent_qwen35_max_internal_tokens = int(
+                        latent_cfg.get("max_internal_tokens", 1200)
+                    )
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
@@ -1792,19 +1803,34 @@ class GPUModelRunner(
         latent_cfg = sampling_params.extra_args.get("latent_qwen35")
         if isinstance(latent_cfg, dict):
             checkpoint = latent_cfg.get("checkpoint")
-            return str(checkpoint) if checkpoint else None
+            if not checkpoint:
+                raise ValueError(
+                    "SamplingParams.extra_args['latent_qwen35'] must include "
+                    "a non-empty 'checkpoint' path."
+                )
+            return str(Path(str(checkpoint)).expanduser().resolve())
+        if latent_cfg:
+            raise ValueError(
+                "SamplingParams.extra_args['latent_qwen35'] must be a dict with "
+                "a 'checkpoint' path."
+            )
         return None
 
     def _ensure_latent_qwen35_head(
         self,
         sampling_params: SamplingParams,
     ) -> torch.nn.Module | None:
-        if self.latent_qwen35_head is not None:
-            return self.latent_qwen35_head
-
         checkpoint = self._get_latent_qwen35_checkpoint(sampling_params)
         if checkpoint is None:
             return None
+        if self.latent_qwen35_head is not None:
+            if self.latent_qwen35_checkpoint != checkpoint:
+                raise RuntimeError(
+                    "A Qwen3.5 latent MTP head is already loaded from "
+                    f"{self.latent_qwen35_checkpoint}; refusing to reuse it for "
+                    f"{checkpoint}. Create a new LLM instance per latent checkpoint."
+                )
+            return self.latent_qwen35_head
 
         from vllm.latent.qwen3_5_mtp import build_standalone_latent_head
 
@@ -1814,6 +1840,7 @@ class GPUModelRunner(
             device=self.device,
             dtype=self.dtype,
         )
+        self.latent_qwen35_checkpoint = checkpoint
         return self.latent_qwen35_head
 
     def _ensure_latent_qwen35_mtp_cache(self, req_id: str):
