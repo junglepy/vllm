@@ -543,6 +543,11 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
+            latent_internal_tokens=sum(
+                int(getattr(res, "latent_internal_token_count", 0))
+                for res in final_res_batch
+            )
+            or None,
         )
 
         if (

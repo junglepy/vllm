@@ -106,6 +106,9 @@ class UsageInfo(OpenAIBaseModel):
     total_tokens: int = 0
     completion_tokens: int | None = 0
     prompt_tokens_details: PromptTokenUsageInfo | None = None
+    # vLLM-specific: internal latent decode steps are not visible completion
+    # tokens, but exposing them makes OpenAI-compatible latent aliases auditable.
+    latent_internal_tokens: int | None = None
 
 
 class RequestResponseMetadata(BaseModel):

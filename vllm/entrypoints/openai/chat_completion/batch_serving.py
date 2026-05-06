@@ -309,6 +309,11 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             prompt_tokens=total_prompt_tokens,
             completion_tokens=total_completion_tokens,
             total_tokens=total_prompt_tokens + total_completion_tokens,
+            latent_internal_tokens=sum(
+                int(getattr(res, "latent_internal_token_count", 0))
+                for res in final_results.values()
+            )
+            or None,
         )
         request_metadata.final_usage_info = usage
 

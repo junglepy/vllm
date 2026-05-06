@@ -1629,6 +1629,12 @@ class OpenAIServingChat(OpenAIServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
+            latent_internal_tokens=getattr(
+                final_res,
+                "latent_internal_token_count",
+                0,
+            )
+            or None,
         )
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
