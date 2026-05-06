@@ -1872,6 +1872,83 @@ class GPUModelRunner(
         pending_token_ids = self.latent_qwen35_pending_token_ids_np
         pending_positions = self.latent_qwen35_pending_positions_np
         pending_hidden_gpu = self.latent_qwen35_pending_hidden.gpu
+        fast_all_slots_latent = (
+            0 < total_num_scheduled_tokens <= self.max_num_reqs
+        )
+        if fast_all_slots_latent:
+            for slot in range(total_num_scheduled_tokens):
+                req_idx = int(req_indices_np[slot])
+                if req_idx != slot:
+                    fast_all_slots_latent = False
+                    break
+                req_id = self.input_batch.req_ids[req_idx]
+                if pending_req_ids[req_idx] != req_id:
+                    fast_all_slots_latent = False
+                    break
+                if int(pending_positions[req_idx]) != int(positions_np[slot]):
+                    fast_all_slots_latent = False
+                    break
+
+        if fast_all_slots_latent:
+            profile_entries = total_num_scheduled_tokens
+            compact_input_ids = torch.as_tensor(
+                pending_token_ids[:total_num_scheduled_tokens],
+                dtype=torch.int32,
+                device=self.device,
+            )
+            compact_positions = torch.as_tensor(
+                positions_np[:total_num_scheduled_tokens],
+                dtype=torch.int64,
+                device=self.device,
+            )
+            compact_hidden = pending_hidden_gpu[:total_num_scheduled_tokens].to(
+                device=self.device,
+                dtype=self.dtype,
+            )
+            embeds = self._run_latent_qwen35_native_head(
+                req_indices=list(range(total_num_scheduled_tokens)),
+                query_lens=[1] * total_num_scheduled_tokens,
+                seq_lens=[
+                    int(pos) + 1
+                    for pos in positions_np[:total_num_scheduled_tokens]
+                ],
+                input_ids=compact_input_ids,
+                positions=compact_positions,
+                hidden_states=compact_hidden,
+                slot_mapping=group_slot_mapping[:total_num_scheduled_tokens],
+                return_embeds=True,
+            )
+            if embeds is None:
+                return
+
+            self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(
+                embeds.to(device=self.device, dtype=self.dtype)
+            )
+            for req_idx in range(total_num_scheduled_tokens):
+                req_id = self.input_batch.req_ids[req_idx]
+                pos = int(pending_positions[req_idx])
+                self.latent_qwen35_pending_req_ids[req_idx] = None
+                self.latent_qwen35_pending_by_req_pos.pop((req_id, pos), None)
+            self.latent_qwen35_use_inputs_embeds = True
+            if profile_path:
+                with open(profile_path, "a") as f:
+                    f.write(
+                        json.dumps(
+                            {
+                                "kind": "prepare_latent_native_inputs",
+                                "num_entries": int(profile_entries),
+                                "total_num_scheduled_tokens": int(
+                                    total_num_scheduled_tokens
+                                ),
+                                "fast_all_slots_latent": True,
+                                "elapsed_ms": (time.perf_counter() - profile_start)
+                                * 1000.0,
+                            }
+                        )
+                        + "\n"
+                    )
+            return
+
         for slot in range(total_num_scheduled_tokens):
             req_idx = int(req_indices_np[slot])
             req_id = self.input_batch.req_ids[req_idx]
@@ -1993,6 +2070,7 @@ class GPUModelRunner(
                             ),
                             "elapsed_ms": (time.perf_counter() - profile_start)
                             * 1000.0,
+                            "fast_all_slots_latent": False,
                         }
                     )
                     + "\n"
