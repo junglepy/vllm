@@ -3650,17 +3650,22 @@ class GPUModelRunner(
                     segment_start_pos = int(
                         self.input_batch.num_computed_tokens_cpu[req_idx]
                     )
-                    self._advance_latent_qwen35_mtp_cache(
-                        req_id=req_id,
-                        req_idx=req_idx,
-                        input_ids=self.input_ids.gpu[
-                            hidden_offset : hidden_offset + scheduled_len
-                        ],
-                        hidden_states=hidden_states[
-                            hidden_offset : hidden_offset + scheduled_len
-                        ],
-                        start_pos=segment_start_pos,
+                    sample_pos = int(self.input_batch.num_tokens_no_spec[req_idx])
+                    prefill_len = min(
+                        scheduled_len, max(0, sample_pos - segment_start_pos)
                     )
+                    if prefill_len > 0:
+                        self._advance_latent_qwen35_mtp_cache(
+                            req_id=req_id,
+                            req_idx=req_idx,
+                            input_ids=self.input_ids.gpu[
+                                hidden_offset : hidden_offset + prefill_len
+                            ],
+                            hidden_states=hidden_states[
+                                hidden_offset : hidden_offset + prefill_len
+                            ],
+                            start_pos=segment_start_pos,
+                        )
                 hidden_offset += scheduled_len
 
         internal_sampled_token_ids = [[] for _ in req_ids_output_copy]
