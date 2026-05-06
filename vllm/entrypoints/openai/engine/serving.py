@@ -54,6 +54,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 from vllm.entrypoints.utils import create_error_response
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
+from vllm.latent.config import LATENT_REASONING_EXTRA_ARGS_KEY
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -487,7 +488,7 @@ class OpenAIServing:
             raise ValueError("Latent reasoning aliases do not support beam search.")
 
         extra_args = dict(params.extra_args or {})
-        existing = extra_args.get("latent_reasoning")
+        existing = extra_args.get(LATENT_REASONING_EXTRA_ARGS_KEY)
         if existing is not None and existing != latent_cfg:
             raise ValueError(
                 "Request vllm_xargs already contains latent_reasoning that conflicts "
@@ -499,7 +500,7 @@ class OpenAIServing:
                 "Request vllm_xargs already contains latent_qwen35 that conflicts "
                 f"with model alias {request.model}."
             )
-        extra_args["latent_reasoning"] = dict(latent_cfg)
+        extra_args[LATENT_REASONING_EXTRA_ARGS_KEY] = dict(latent_cfg)
         params.extra_args = extra_args
         return params
 

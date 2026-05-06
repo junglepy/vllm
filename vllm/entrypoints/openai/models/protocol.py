@@ -4,6 +4,8 @@
 
 from dataclasses import dataclass
 
+from vllm.latent.config import QWEN35_MTP_BACKEND
+
 
 @dataclass
 class BaseModelPath:
@@ -23,7 +25,7 @@ class LatentReasoningModulePath:
     name: str
     path: str
     base_model_name: str | None = None
-    backend: str = "qwen35_mtp"
+    backend: str = QWEN35_MTP_BACKEND
     think_close_token_id: int = 248069
     max_internal_tokens: int = 1200
 
@@ -51,7 +53,7 @@ class LatentQwen35ModulePath:
             name=self.name,
             path=self.path,
             base_model_name=self.base_model_name,
-            backend="qwen35_mtp",
+            backend=QWEN35_MTP_BACKEND,
             think_close_token_id=self.think_close_token_id,
             max_internal_tokens=self.max_internal_tokens,
         ).to_extra_args()

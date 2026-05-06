@@ -53,6 +53,7 @@ from vllm.forward_context import (
     set_forward_context,
 )
 from vllm.logger import init_logger
+from vllm.latent.config import normalize_latent_reasoning_config
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -2207,38 +2208,22 @@ class GPUModelRunner(
         self,
         sampling_params: SamplingParams | None,
     ) -> dict[str, object] | None:
-        if sampling_params is None or not sampling_params.extra_args:
-            return None
-        latent_cfg = sampling_params.extra_args.get("latent_reasoning")
-        if latent_cfg is None:
-            latent_cfg = sampling_params.extra_args.get("latent_qwen35")
-        if isinstance(latent_cfg, dict):
-            backend = latent_cfg.get("backend", "qwen35_mtp")
-            if backend != "qwen35_mtp":
-                raise ValueError(
-                    "SamplingParams.extra_args['latent_reasoning'] currently "
-                    f"supports backend='qwen35_mtp', got {backend!r}."
-                )
-            checkpoint = latent_cfg.get("checkpoint")
-            if not checkpoint:
-                raise ValueError(
-                    "SamplingParams.extra_args['latent_reasoning'] must include "
-                    "a non-empty 'checkpoint' path."
-                )
-            return latent_cfg
-        if latent_cfg:
+        latent_cfg = normalize_latent_reasoning_config(
+            None if sampling_params is None else sampling_params.extra_args
+        )
+        if latent_cfg is not None and self.use_async_scheduling:
             raise ValueError(
-                "SamplingParams.extra_args['latent_reasoning'] must be a dict with "
-                "a 'checkpoint' path."
+                "Latent reasoning currently requires async_scheduling=False. "
+                "Use a latent model alias through vllm serve, or construct "
+                "LLM(..., async_scheduling=False) for offline inference."
             )
-        return None
+        return latent_cfg
 
     def _get_latent_qwen35_checkpoint(self, sampling_params: SamplingParams) -> str | None:
         latent_cfg = self._get_latent_qwen35_config(sampling_params)
         if latent_cfg is None:
             return None
-        checkpoint = latent_cfg["checkpoint"]
-        return str(Path(str(checkpoint)).expanduser().resolve())
+        return str(latent_cfg["checkpoint"])
 
     def _maybe_init_latent_qwen35_native_head(self) -> None:
         hf_config = self.model_config.hf_text_config
