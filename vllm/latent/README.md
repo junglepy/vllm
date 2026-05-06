@@ -92,6 +92,9 @@ Then clients can choose the execution mode via the standard `model` field:
 
 The base alias uses ordinary vLLM decoding. A latent alias injects
 `SamplingParams.extra_args["latent_qwen35"]` before scheduling the request.
+When `--latent-qwen35-modules` is provided, the OpenAI-compatible server sets
+`LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS=1` by default unless the operator already
+set it explicitly.
 
 CLI:
 
@@ -132,6 +135,9 @@ Known constraints in this branch:
   checkpoints and cached by checkpoint path;
 - `max_internal_tokens` is enforced separately from vLLM `max_tokens`, because
   vLLM `max_tokens` counts visible output tokens only.
+- direct Python `LLM.generate()` calls still enable latent mode through
+  `SamplingParams.extra_args["latent_qwen35"]`; the OpenAI-compatible server can
+  avoid request-side `extra_args` by using latent model aliases.
 
 Smoke result on B200 with `checkpoint_step5500_NEW.pt`, compiled vLLM path,
 `max_model_len=512`, `async_scheduling=False`:

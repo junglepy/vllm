@@ -6,7 +6,10 @@ import json
 import pytest
 
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.entrypoints.openai.models.protocol import (
+    LatentQwen35ModulePath,
+    LoRAModulePath,
+)
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from ...utils import VLLM_PATH
@@ -125,6 +128,50 @@ def test_empty_values(serve_parser):
     # Test when no LoRA modules are provided
     args = serve_parser.parse_args(["--lora-modules", ""])
     assert args.lora_modules == []
+
+
+def test_latent_qwen35_key_value_format(serve_parser):
+    args = serve_parser.parse_args(
+        [
+            "--latent-qwen35-modules",
+            "latent-step5500=/path/to/step5500.pt",
+        ]
+    )
+    assert args.latent_qwen35_modules == [
+        LatentQwen35ModulePath(
+            name="latent-step5500",
+            path="/path/to/step5500.pt",
+        )
+    ]
+
+
+def test_latent_qwen35_json_format(serve_parser):
+    module = {
+        "name": "latent-step5500",
+        "path": "/path/to/step5500.pt",
+        "base_model_name": "qwen35-base",
+        "think_close_token_id": 248069,
+        "max_internal_tokens": 3000,
+    }
+    args = serve_parser.parse_args(
+        [
+            "--latent-qwen35-modules",
+            json.dumps(module),
+        ]
+    )
+    assert args.latent_qwen35_modules == [
+        LatentQwen35ModulePath(**module)
+    ]
+
+
+def test_latent_qwen35_invalid_json_field(serve_parser):
+    with pytest.raises(SystemExit):
+        serve_parser.parse_args(
+            [
+                "--latent-qwen35-modules",
+                '{"name": "latent-step5500"}',
+            ]
+        )
 
 
 def test_multiple_valid_inputs(serve_parser):

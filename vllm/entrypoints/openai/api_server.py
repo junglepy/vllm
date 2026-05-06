@@ -680,10 +680,17 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
 
+def _enable_latent_qwen35_defaults(args: Namespace) -> None:
+    if getattr(args, "latent_qwen35_modules", None):
+        os.environ.setdefault("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS", "1")
+
+
 async def run_server_worker(
     listen_address, sock, args, client_config=None, **uvicorn_kwargs
 ) -> None:
     """Run a single API server worker."""
+
+    _enable_latent_qwen35_defaults(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)

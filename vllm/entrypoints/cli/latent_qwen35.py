@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,8 @@ class LatentQwen35Subcommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
+        os.environ.setdefault("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS", "1")
+
         from transformers import AutoTokenizer
 
         from vllm import LLM, SamplingParams
