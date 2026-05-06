@@ -13,7 +13,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     ModelList,
     ModelPermission,
 )
-from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
+from vllm.entrypoints.openai.models.protocol import (
+    BaseModelPath,
+    LatentQwen35ModulePath,
+    LoRAModulePath,
+)
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
@@ -39,16 +43,28 @@ class OpenAIModelRegistry:
         self,
         model_config: ModelConfig,
         base_model_paths: list[BaseModelPath],
+        latent_qwen35_modules: list[LatentQwen35ModulePath] | None = None,
     ) -> None:
         self.model_config = model_config
         self.base_model_paths = base_model_paths
+        self.latent_qwen35_modules = latent_qwen35_modules or []
+        self.latent_qwen35_requests = {
+            module.name: module for module in self.latent_qwen35_modules
+        }
 
     def is_base_model(self, model_name: str) -> bool:
         return any(model.name == model_name for model in self.base_model_paths)
 
+    def is_latent_qwen35_model(self, model_name: str) -> bool:
+        return model_name in self.latent_qwen35_requests
+
     async def check_model(self, model_name: str | None) -> ErrorResponse | None:
         """Return an ErrorResponse if model_name is not served, else None."""
-        if not model_name or self.is_base_model(model_name):
+        if (
+            not model_name
+            or self.is_base_model(model_name)
+            or self.is_latent_qwen35_model(model_name)
+        ):
             return None
         return create_error_response(
             message=f"The model `{model_name}` does not exist.",
@@ -70,6 +86,16 @@ class OpenAIModelRegistry:
                 )
                 for base_model in self.base_model_paths
             ]
+            + [
+                ModelCard(
+                    id=module.name,
+                    max_model_len=max_model_len,
+                    root=module.path,
+                    parent=module.base_model_name or self.base_model_paths[0].name,
+                    permission=[ModelPermission()],
+                )
+                for module in self.latent_qwen35_modules
+            ]
         )
 
 
@@ -88,18 +114,24 @@ class OpenAIServingModels:
         base_model_paths: list[BaseModelPath],
         *,
         lora_modules: list[LoRAModulePath] | None = None,
+        latent_qwen35_modules: list[LatentQwen35ModulePath] | None = None,
     ):
         super().__init__()
 
         self.registry = OpenAIModelRegistry(
             model_config=engine_client.model_config,
             base_model_paths=base_model_paths,
+            latent_qwen35_modules=latent_qwen35_modules,
         )
 
         self.engine_client = engine_client
         self.base_model_paths = base_model_paths
 
         self.static_lora_modules = lora_modules
+        self.latent_qwen35_modules = latent_qwen35_modules or []
+        self.latent_qwen35_requests = {
+            module.name: module for module in self.latent_qwen35_modules
+        }
         self.lora_requests: dict[str, LoRARequest] = {}
         self.lora_id_counter = AtomicCounter(0)
 
@@ -132,9 +164,28 @@ class OpenAIServingModels:
     def is_base_model(self, model_name: str) -> bool:
         return self.registry.is_base_model(model_name)
 
-    def model_name(self, lora_request: LoRARequest | None = None) -> str:
+    def is_latent_qwen35_model(self, model_name: str | None) -> bool:
+        return bool(model_name) and self.registry.is_latent_qwen35_model(model_name)
+
+    def latent_qwen35_extra_args(
+        self,
+        model_name: str | None,
+    ) -> dict[str, int | str] | None:
+        if not model_name:
+            return None
+        module = self.latent_qwen35_requests.get(model_name)
+        return None if module is None else module.to_extra_args()
+
+    def model_name(
+        self,
+        lora_request: LoRARequest | None = None,
+        request_model_name: str | None = None,
+    ) -> str:
         if lora_request is not None:
             return lora_request.lora_name
+        if self.is_latent_qwen35_model(request_model_name):
+            assert request_model_name is not None
+            return request_model_name
         return self.base_model_paths[0].name
 
     async def show_available_models(self) -> ModelList:

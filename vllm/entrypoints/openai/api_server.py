@@ -363,6 +363,7 @@ async def init_app_state(
         engine_client=engine_client,
         base_model_paths=base_model_paths,
         lora_modules=lora_modules,
+        latent_qwen35_modules=args.latent_qwen35_modules,
     )
     await state.openai_serving_models.init_static_loras()
 
@@ -453,6 +454,7 @@ async def init_render_app_state(
             BaseModelPath(name=name, model_path=args.model)
             for name in served_model_names
         ],
+        latent_qwen35_modules=args.latent_qwen35_modules,
     )
 
     if args.enable_log_requests:

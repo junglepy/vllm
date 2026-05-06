@@ -264,7 +264,7 @@ class OpenAIServingChat(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
 
-        model_name = self.models.model_name(lora_request)
+        model_name = self._response_model_name(request, lora_request)
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
@@ -301,6 +301,7 @@ class OpenAIServingChat(OpenAIServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+            sampling_params = self._apply_latent_qwen35_alias(request, sampling_params)
 
             self._log_inputs(
                 sub_request_id,

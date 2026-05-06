@@ -163,6 +163,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+            sampling_params = self._apply_latent_qwen35_alias(request, sampling_params)
 
             request_id_item = f"{request_id}-{i}"
 
@@ -202,7 +203,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
         result_generator = merge_async_iterators(*generators)
 
-        model_name = self.models.model_name(lora_request)
+        model_name = self._response_model_name(request, lora_request)
         num_prompts = len(engine_inputs)
 
         # Streaming response

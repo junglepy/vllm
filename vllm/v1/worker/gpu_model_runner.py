@@ -718,8 +718,7 @@ class GPUModelRunner(
         self.latent_qwen35_embeds_by_req_pos: dict[
             tuple[str, int], torch.Tensor
         ] = {}
-        self.latent_qwen35_head: torch.nn.Module | None = None
-        self.latent_qwen35_checkpoint: str | None = None
+        self.latent_qwen35_heads: dict[str, torch.nn.Module] = {}
         self.latent_qwen35_mtp_caches: dict[str, object] = {}
         self.latent_qwen35_use_inputs_embeds = False
         self.discard_request_mask = self._make_buffer(
@@ -1823,34 +1822,28 @@ class GPUModelRunner(
         checkpoint = self._get_latent_qwen35_checkpoint(sampling_params)
         if checkpoint is None:
             return None
-        if self.latent_qwen35_head is not None:
-            if self.latent_qwen35_checkpoint != checkpoint:
-                raise RuntimeError(
-                    "A Qwen3.5 latent MTP head is already loaded from "
-                    f"{self.latent_qwen35_checkpoint}; refusing to reuse it for "
-                    f"{checkpoint}. Create a new LLM instance per latent checkpoint."
-                )
-            return self.latent_qwen35_head
+        head = self.latent_qwen35_heads.get(checkpoint)
+        if head is not None:
+            return head
 
         from vllm.latent.qwen3_5_mtp import build_standalone_latent_head
 
-        self.latent_qwen35_head = build_standalone_latent_head(
+        head = build_standalone_latent_head(
             self.model_config.hf_text_config,
             checkpoint,
             device=self.device,
             dtype=self.dtype,
         )
-        self.latent_qwen35_checkpoint = checkpoint
-        return self.latent_qwen35_head
+        self.latent_qwen35_heads[checkpoint] = head
+        return head
 
-    def _ensure_latent_qwen35_mtp_cache(self, req_id: str):
+    def _ensure_latent_qwen35_mtp_cache(self, req_id: str, head: torch.nn.Module):
         cache = self.latent_qwen35_mtp_caches.get(req_id)
         if cache is not None:
             return cache
         from transformers.cache_utils import DynamicCache
 
-        assert self.latent_qwen35_head is not None
-        cache = DynamicCache(config=self.latent_qwen35_head.core.config)
+        cache = DynamicCache(config=head.core.config)
         self.latent_qwen35_mtp_caches[req_id] = cache
         return cache
 
@@ -1868,7 +1861,7 @@ class GPUModelRunner(
         if head is None:
             return False
 
-        cache = self._ensure_latent_qwen35_mtp_cache(req_id)
+        cache = self._ensure_latent_qwen35_mtp_cache(req_id, head)
         cache_len = int(cache.get_seq_length())
         if hidden_states.shape[0] == 0:
             return cache_len == start_pos
@@ -1914,7 +1907,7 @@ class GPUModelRunner(
         if head is None:
             return None
 
-        cache = self._ensure_latent_qwen35_mtp_cache(req_id)
+        cache = self._ensure_latent_qwen35_mtp_cache(req_id, head)
         cache_len = int(cache.get_seq_length())
         if cache_len != position:
             logger.warning_once(

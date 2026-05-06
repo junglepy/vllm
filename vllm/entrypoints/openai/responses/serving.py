@@ -374,7 +374,7 @@ class OpenAIServingResponses(OpenAIServing):
             prev_response = None
 
         lora_request = self._maybe_get_adapters(request)
-        model_name = self.models.model_name(lora_request)
+        model_name = self._response_model_name(request, lora_request)
 
         if self.use_harmony:
             messages, engine_inputs = self._make_request_with_harmony(
@@ -437,6 +437,7 @@ class OpenAIServingResponses(OpenAIServing):
             sampling_params = request.to_sampling_params(
                 default_max_tokens, self.default_sampling_params
             )
+            sampling_params = self._apply_latent_qwen35_alias(request, sampling_params)
 
             trace_headers = (
                 None

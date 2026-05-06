@@ -54,6 +54,45 @@ print(out.outputs[0].text)
 print(out.latent_internal_token_count)
 ```
 
+Multiple latent heads can be loaded in one `LLM` instance. The worker keeps a
+head cache keyed by resolved checkpoint path, while each request keeps its own
+MTP KV cache:
+
+```python
+for checkpoint in [step1500, step5500]:
+    params = SamplingParams(
+        temperature=0.0,
+        max_tokens=64,
+        extra_args={
+            "latent_qwen35": {
+                "checkpoint": checkpoint,
+                "think_close_token_id": 248069,
+                "max_internal_tokens": 1200,
+            }
+        },
+    )
+    out = llm.generate([prompt], params)[0]
+```
+
+OpenAI-compatible server aliases:
+
+```bash
+vllm serve /workspace/latent-mimo/qwen35_27b_tests/models/Qwen3.5-27B \
+  --served-model-name qwen35-27b-base \
+  --latent-qwen35-modules qwen35-27b-latent-step1500=/workspace/latent-mimo/deploy_archives/checkpoint_step1500_NEW.pt \
+  --latent-qwen35-modules '{"name":"qwen35-27b-latent-step5500","path":"/workspace/latent-mimo/deploy_archives/checkpoint_step5500_NEW.pt","max_internal_tokens":1200}'
+```
+
+Then clients can choose the execution mode via the standard `model` field:
+
+```json
+{"model": "qwen35-27b-base", "messages": [...]}
+{"model": "qwen35-27b-latent-step5500", "messages": [...]}
+```
+
+The base alias uses ordinary vLLM decoding. A latent alias injects
+`SamplingParams.extra_args["latent_qwen35"]` before scheduling the request.
+
 CLI:
 
 ```bash
@@ -89,8 +128,8 @@ Known constraints in this branch:
 
 - latent mode currently requires `async_scheduling=False` because the internal
   token bookkeeping updates worker state synchronously;
-- the MTP head is loaded as a worker-side module from the latent-mimo `.pt`
-  checkpoint;
+- MTP heads are loaded lazily as worker-side modules from latent-mimo `.pt`
+  checkpoints and cached by checkpoint path;
 - `max_internal_tokens` is enforced separately from vLLM `max_tokens`, because
   vLLM `max_tokens` counts visible output tokens only.
 

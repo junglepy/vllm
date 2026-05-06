@@ -475,6 +475,35 @@ class OpenAIServing:
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError(f"The model `{request.model}` does not exist.")
 
+    def _apply_latent_qwen35_alias(
+        self,
+        request: AnyRequest,
+        params: SamplingParams | BeamSearchParams,
+    ) -> SamplingParams | BeamSearchParams:
+        latent_cfg = self.models.latent_qwen35_extra_args(request.model)
+        if latent_cfg is None:
+            return params
+        if isinstance(params, BeamSearchParams):
+            raise ValueError("Qwen3.5 latent aliases do not support beam search.")
+
+        extra_args = dict(params.extra_args or {})
+        existing = extra_args.get("latent_qwen35")
+        if existing is not None and existing != latent_cfg:
+            raise ValueError(
+                "Request vllm_xargs already contains latent_qwen35 that conflicts "
+                f"with model alias {request.model}."
+            )
+        extra_args["latent_qwen35"] = dict(latent_cfg)
+        params.extra_args = extra_args
+        return params
+
+    def _response_model_name(
+        self,
+        request: AnyRequest,
+        lora_request: LoRARequest | None = None,
+    ) -> str:
+        return self.models.model_name(lora_request, request.model)
+
     def _get_message_types(self, request: AnyRequest) -> set[str]:
         """Retrieve the set of types from message content dicts up
         until `_`; we use this to match potential multimodal data
@@ -742,7 +771,9 @@ class OpenAIServing:
     def _is_model_supported(self, model_name: str | None) -> bool:
         if not model_name:
             return True
-        return self.models.is_base_model(model_name)
+        return self.models.is_base_model(model_name) or self.models.is_latent_qwen35_model(
+            model_name
+        )
 
 
 def clamp_prompt_logprobs(
