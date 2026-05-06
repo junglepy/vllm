@@ -704,6 +704,12 @@ def _enable_latent_reasoning_defaults(args: Namespace) -> None:
         # The current latent path mutates worker-side request state during decode
         # bookkeeping, so keep the server on the synchronous scheduler unless
         # latent bookkeeping is moved into the async-safe path.
+        if getattr(args, "async_scheduling", False):
+            logger.warning(
+                "Latent reasoning modules require async_scheduling=False in "
+                "the current implementation; overriding async_scheduling for "
+                "correct latent next-embedding transitions."
+            )
         args.async_scheduling = False
 
 
