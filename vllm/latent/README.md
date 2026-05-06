@@ -170,3 +170,14 @@ Smoke result on B200 with `checkpoint_step5500_NEW.pt`, compiled vLLM path,
 ```text
 visible=13, internal=162, total_steps=175, warm total_steps_per_s ~= 67.9
 ```
+
+OpenAI-compatible server check on the same checkpoint after the native pending
+state cleanup:
+
+```text
+artifact: /workspace/latent-mimo/artifacts/qwen_vllm_latent_server_check_after_native_cleanup
+base alias: qwen35-base
+latent alias: qwen35-latent-step5500
+latent reasoning_tokens: 175
+latent content: </think>\n\n42
+```

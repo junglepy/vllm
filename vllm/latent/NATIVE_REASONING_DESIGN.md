@@ -54,7 +54,10 @@ Already in this branch:
 - Qwen3.5 MTP head is loaded as a native vLLM module and cached by checkpoint;
 - native usage fields report latent internal steps as `reasoning_tokens`;
 - server smoke artifact exists under
-  `/workspace/latent-mimo/artifacts/qwen_vllm_latent_server_check_generic`.
+  `/workspace/latent-mimo/artifacts/qwen_vllm_latent_server_check_generic`;
+- current server check after native pending cleanup exists under
+  `/workspace/latent-mimo/artifacts/qwen_vllm_latent_server_check_after_native_cleanup`
+  and verifies base + latent aliases through `/v1/chat/completions`.
 
 Still not done:
 
