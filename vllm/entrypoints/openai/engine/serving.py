@@ -476,7 +476,7 @@ class OpenAIServing:
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError(f"The model `{request.model}` does not exist.")
 
-    def _apply_latent_qwen35_alias(
+    def _apply_latent_reasoning_alias(
         self,
         request: AnyRequest,
         params: SamplingParams | BeamSearchParams,
@@ -503,6 +503,13 @@ class OpenAIServing:
         extra_args[LATENT_REASONING_EXTRA_ARGS_KEY] = dict(latent_cfg)
         params.extra_args = extra_args
         return params
+
+    def _apply_latent_qwen35_alias(
+        self,
+        request: AnyRequest,
+        params: SamplingParams | BeamSearchParams,
+    ) -> SamplingParams | BeamSearchParams:
+        return self._apply_latent_reasoning_alias(request, params)
 
     def _response_model_name(
         self,

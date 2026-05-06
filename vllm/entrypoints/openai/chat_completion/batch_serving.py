@@ -163,7 +163,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             sampling_params = single_request.to_sampling_params(
                 max_tokens, self.default_sampling_params
             )
-            sampling_params = self._apply_latent_qwen35_alias(
+            sampling_params = self._apply_latent_reasoning_alias(
                 single_request, sampling_params
             )
             self._log_inputs(

@@ -44,7 +44,7 @@ def test_latent_qwen35_alias_injects_sampling_extra_args():
     request = SimpleNamespace(model="latent-step5500")
     params = SamplingParams(max_tokens=8)
 
-    out = serving._apply_latent_qwen35_alias(request, params)
+    out = serving._apply_latent_reasoning_alias(request, params)
 
     assert out is params
     assert out.extra_args == {"latent_reasoning": cfg}
@@ -64,7 +64,7 @@ def test_latent_qwen35_alias_preserves_non_conflicting_extra_args():
         extra_args={"trace_id": "abc", "latent_reasoning": dict(cfg)},
     )
 
-    out = serving._apply_latent_qwen35_alias(request, params)
+    out = serving._apply_latent_reasoning_alias(request, params)
 
     assert out.extra_args == {"trace_id": "abc", "latent_reasoning": cfg}
 
@@ -91,7 +91,7 @@ def test_latent_qwen35_alias_rejects_conflicting_extra_args():
     )
 
     with pytest.raises(ValueError, match="conflicts with model alias"):
-        serving._apply_latent_qwen35_alias(request, params)
+        serving._apply_latent_reasoning_alias(request, params)
 
 
 def test_latent_qwen35_alias_rejects_beam_search():
@@ -105,7 +105,7 @@ def test_latent_qwen35_alias_rejects_beam_search():
     request = SimpleNamespace(model="latent-step5500")
 
     with pytest.raises(ValueError, match="do not support beam search"):
-        serving._apply_latent_qwen35_alias(
+        serving._apply_latent_reasoning_alias(
             request,
             BeamSearchParams(beam_width=2, max_tokens=8),
         )

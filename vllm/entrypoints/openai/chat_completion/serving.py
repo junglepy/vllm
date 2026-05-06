@@ -302,7 +302,7 @@ class OpenAIServingChat(OpenAIServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
-            sampling_params = self._apply_latent_qwen35_alias(request, sampling_params)
+            sampling_params = self._apply_latent_reasoning_alias(request, sampling_params)
 
             self._log_inputs(
                 sub_request_id,
