@@ -54,6 +54,10 @@ from vllm.entrypoints.utils import (
     log_version_and_model,
     process_lora_modules,
 )
+from vllm.latent.config import (
+    QWEN35_MTP_BACKEND,
+    latent_reasoning_capture_env_names,
+)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS, SupportedTask
@@ -682,16 +686,29 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
 
-def _enable_latent_qwen35_defaults(args: Namespace) -> None:
-    if (
-        getattr(args, "latent_reasoning_modules", None)
-        or getattr(args, "latent_qwen35_modules", None)
-    ):
-        os.environ.setdefault("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS", "1")
-        # The current Qwen latent path mutates worker-side request state during
-        # decode bookkeeping, so keep the server on the synchronous scheduler
-        # unless/until latent bookkeeping is moved into the async-safe path.
+def _latent_reasoning_module_backends(args: Namespace) -> set[str]:
+    backends = {
+        module.backend
+        for module in getattr(args, "latent_reasoning_modules", None) or []
+    }
+    if getattr(args, "latent_qwen35_modules", None):
+        backends.add(QWEN35_MTP_BACKEND)
+    return backends
+
+
+def _enable_latent_reasoning_defaults(args: Namespace) -> None:
+    backends = _latent_reasoning_module_backends(args)
+    if backends:
+        for env_name in latent_reasoning_capture_env_names(backends):
+            os.environ.setdefault(env_name, "1")
+        # The current latent path mutates worker-side request state during decode
+        # bookkeeping, so keep the server on the synchronous scheduler unless
+        # latent bookkeeping is moved into the async-safe path.
         args.async_scheduling = False
+
+
+def _enable_latent_qwen35_defaults(args: Namespace) -> None:
+    _enable_latent_reasoning_defaults(args)
 
 
 async def run_server_worker(
@@ -699,7 +716,7 @@ async def run_server_worker(
 ) -> None:
     """Run a single API server worker."""
 
-    _enable_latent_qwen35_defaults(args)
+    _enable_latent_reasoning_defaults(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)

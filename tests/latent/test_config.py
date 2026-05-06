@@ -3,7 +3,22 @@
 
 import pytest
 
-from vllm.latent.config import normalize_latent_reasoning_config
+from vllm.latent.config import (
+    get_latent_reasoning_backend_spec,
+    latent_reasoning_capture_env_names,
+    normalize_latent_reasoning_config,
+)
+
+
+def test_backend_registry_exposes_qwen35_defaults():
+    spec = get_latent_reasoning_backend_spec("qwen35_mtp")
+
+    assert spec.default_think_close_token_id == 248069
+    assert spec.default_max_internal_tokens == 1200
+    assert spec.capture_inputs_embeds_env == "LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS"
+    assert latent_reasoning_capture_env_names({"qwen35_mtp"}) == {
+        "LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS"
+    }
 
 
 def test_normalize_latent_reasoning_config():

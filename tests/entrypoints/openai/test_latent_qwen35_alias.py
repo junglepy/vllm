@@ -7,7 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm.entrypoints.openai.api_server import _enable_latent_qwen35_defaults
+from vllm.entrypoints.openai.api_server import (
+    _enable_latent_qwen35_defaults,
+    _enable_latent_reasoning_defaults,
+)
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.protocol import (
     LatentQwen35ModulePath,
@@ -167,6 +170,26 @@ def test_latent_qwen35_server_sets_capture_env(monkeypatch):
     )
 
     _enable_latent_qwen35_defaults(args)
+
+    assert os.environ["LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS"] == "1"
+    assert args.async_scheduling is False
+
+
+def test_latent_reasoning_server_sets_capture_env(monkeypatch):
+    monkeypatch.delenv("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS", raising=False)
+    args = Namespace(
+        async_scheduling=True,
+        latent_reasoning_modules=[
+            LatentReasoningModulePath(
+                name="latent-step5500",
+                path="/path/to/step5500.pt",
+                backend="qwen35_mtp",
+            )
+        ],
+        latent_qwen35_modules=[],
+    )
+
+    _enable_latent_reasoning_defaults(args)
 
     assert os.environ["LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS"] == "1"
     assert args.async_scheduling is False
