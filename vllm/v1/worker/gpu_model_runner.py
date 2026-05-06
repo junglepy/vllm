@@ -1168,6 +1168,15 @@ class GPUModelRunner(
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
+            if sampling_params and sampling_params.extra_args:
+                latent_cfg = sampling_params.extra_args.get("latent_qwen35")
+                if latent_cfg:
+                    req_state.latent_qwen35_active = True
+                    req_state.latent_qwen35_internal_positions = set()
+                    if isinstance(latent_cfg, dict):
+                        req_state.latent_qwen35_think_close_token_id = int(
+                            latent_cfg.get("think_close_token_id", 248069)
+                        )
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
@@ -3367,6 +3376,7 @@ class GPUModelRunner(
         dict[str, int],
         LogprobsLists | None,
         list[list[int]],
+        list[list[int]],
         dict[str, LogprobsTensors | None],
         list[str],
         dict[str, int],
@@ -3433,6 +3443,22 @@ class GPUModelRunner(
                 if i not in invalid_req_indices_set
             }
 
+        internal_sampled_token_ids = [[] for _ in req_ids_output_copy]
+        if not self.use_async_scheduling and valid_sampled_token_ids:
+            for req_idx, sampled_ids in enumerate(valid_sampled_token_ids):
+                if len(sampled_ids) != 1:
+                    continue
+                req_id = req_ids_output_copy[req_idx]
+                req_state = self.requests[req_id]
+                if not req_state.latent_qwen35_active:
+                    continue
+                token_id = int(sampled_ids[0])
+                if token_id == int(req_state.latent_qwen35_think_close_token_id):
+                    req_state.latent_qwen35_active = False
+                    continue
+                internal_sampled_token_ids[req_idx] = [token_id]
+                valid_sampled_token_ids[req_idx] = []
+
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
         # NOTE(woosuk): As an exception, when using PP, the scheduler sends
@@ -3443,7 +3469,10 @@ class GPUModelRunner(
             if self.use_async_scheduling:
                 sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
             else:
-                sampled_ids = valid_sampled_token_ids[req_idx]
+                sampled_ids = (
+                    internal_sampled_token_ids[req_idx]
+                    or valid_sampled_token_ids[req_idx]
+                )
 
             num_sampled_ids: int = len(sampled_ids) if sampled_ids else 0
 
@@ -3464,6 +3493,12 @@ class GPUModelRunner(
 
             req_id = req_ids[req_idx]
             req_state = self.requests[req_id]
+            if internal_sampled_token_ids[req_idx]:
+                if req_state.latent_qwen35_internal_positions is None:
+                    req_state.latent_qwen35_internal_positions = set()
+                req_state.latent_qwen35_internal_positions.update(
+                    range(start_idx, end_idx)
+                )
             req_state.output_token_ids.extend(sampled_ids)
 
         # Compute prompt logprobs if needed.
@@ -3476,6 +3511,7 @@ class GPUModelRunner(
             num_nans_in_logits,
             logprobs_lists,
             valid_sampled_token_ids,
+            internal_sampled_token_ids,
             prompt_logprobs_dict,
             req_ids_output_copy,
             req_id_to_index_output_copy,
@@ -4297,6 +4333,7 @@ class GPUModelRunner(
                 num_nans_in_logits,
                 logprobs_lists,
                 valid_sampled_token_ids,
+                internal_sampled_token_ids,
                 prompt_logprobs_dict,
                 req_ids_output_copy,
                 req_id_to_index_output_copy,
@@ -4339,6 +4376,7 @@ class GPUModelRunner(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
                 sampled_token_ids=valid_sampled_token_ids,
+                internal_token_ids=internal_sampled_token_ids,
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
                 kv_connector_output=kv_connector_output,

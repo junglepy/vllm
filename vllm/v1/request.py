@@ -137,6 +137,7 @@ class Request:
         self.discard_latest_async_tokens = False
 
         self.spec_token_ids: list[int] = []
+        self.latent_internal_token_ids: set[int] = set()
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
 
@@ -211,6 +212,27 @@ class Request:
             self._all_token_ids.append(token_ids)
         else:
             self._output_token_ids.extend(token_ids)
+            self._all_token_ids.extend(token_ids)
+
+        self.update_block_hashes()
+
+    def append_internal_token_ids(
+        self,
+        token_ids: int | list[int],
+    ) -> None:
+        """Append generated tokens that should advance KV but stay invisible.
+
+        Latent reasoning steps still consume a model position and therefore must
+        be represented in ``all_token_ids`` for scheduler/KV-cache accounting.
+        They are intentionally not appended to ``output_token_ids`` so the
+        frontend never detokenizes or returns them.
+        """
+        if isinstance(token_ids, int):
+            self.latent_internal_token_ids.add(len(self._all_token_ids))
+            self._all_token_ids.append(token_ids)
+        else:
+            start = len(self._all_token_ids)
+            self.latent_internal_token_ids.update(range(start, start + len(token_ids)))
             self._all_token_ids.extend(token_ids)
 
         self.update_block_hashes()

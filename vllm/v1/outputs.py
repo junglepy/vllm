@@ -174,6 +174,9 @@ class ModelRunnerOutput:
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
     sampled_token_ids: list[list[int]] = field(default_factory=list)
+    # Same shape/order as sampled_token_ids. Tokens here advance the request
+    # sequence and KV cache but are not surfaced to clients.
+    internal_token_ids: list[list[int]] = field(default_factory=list)
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]

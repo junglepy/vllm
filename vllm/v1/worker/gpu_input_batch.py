@@ -48,6 +48,9 @@ class CachedRequestState:
 
     # Used when both async_scheduling and spec_decode are enabled.
     prev_num_draft_len: int = 0
+    latent_qwen35_active: bool = False
+    latent_qwen35_think_close_token_id: int = 248069
+    latent_qwen35_internal_positions: set[int] | None = None
 
     # for pooling models
     pooling_params: PoolingParams | None = None
