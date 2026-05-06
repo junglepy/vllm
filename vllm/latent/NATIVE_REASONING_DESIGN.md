@@ -48,6 +48,9 @@ Already in this branch:
 - request-side `extra_args` is not required for HTTP clients;
 - offline Python still uses `SamplingParams.extra_args["latent_reasoning"]`;
 - backend registry exists in `vllm.latent.config` with `qwen35_mtp`;
+- backend specs include the execution adapter entrypoint
+  (`vllm.model_executor.models.qwen3_5_latent_mtp.Qwen3_5LatentMTP`) and own
+  backend defaults for close token / max internal tokens;
 - Qwen3.5 MTP head is loaded as a native vLLM module and cached by checkpoint;
 - native usage fields report latent internal steps as `reasoning_tokens`;
 - server smoke artifact exists under
@@ -58,8 +61,9 @@ Still not done:
 - `async_scheduling=True` is intentionally rejected for latent requests;
 - latent mode state is still updated in worker-side Python bookkeeping;
 - worker internals still use `latent_qwen35_*` names in several places;
-- the execution adapter is functionally backend-driven, but not yet a clean
-  backend class interface.
+- worker internals do not yet dispatch through a generic backend class; the
+  Qwen3.5 execution adapter is registered, but the worker still calls Qwen-named
+  helper methods.
 
 ## Correct async direction
 

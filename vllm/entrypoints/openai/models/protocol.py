@@ -26,13 +26,19 @@ class LatentReasoningModulePath:
     path: str
     base_model_name: str | None = None
     backend: str = QWEN35_MTP_BACKEND
-    think_close_token_id: int = 248069
-    max_internal_tokens: int = 1200
+    think_close_token_id: int | None = None
+    max_internal_tokens: int | None = None
 
     def __post_init__(self) -> None:
-        get_latent_reasoning_backend_spec(self.backend)
+        spec = get_latent_reasoning_backend_spec(self.backend)
+        if self.think_close_token_id is None:
+            self.think_close_token_id = spec.default_think_close_token_id
+        if self.max_internal_tokens is None:
+            self.max_internal_tokens = spec.default_max_internal_tokens
 
     def to_extra_args(self) -> dict[str, int | str]:
+        assert self.think_close_token_id is not None
+        assert self.max_internal_tokens is not None
         return {
             "backend": self.backend,
             "checkpoint": self.path,

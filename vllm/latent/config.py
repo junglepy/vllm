@@ -26,6 +26,14 @@ class LatentReasoningBackendSpec:
     default_think_close_token_id: int
     default_max_internal_tokens: int
     capture_inputs_embeds_env: str | None = None
+    adapter_module: str | None = None
+    adapter_class: str | None = None
+
+    @property
+    def adapter_qualname(self) -> str | None:
+        if not self.adapter_module or not self.adapter_class:
+            return None
+        return f"{self.adapter_module}.{self.adapter_class}"
 
 
 LATENT_REASONING_BACKENDS: dict[str, LatentReasoningBackendSpec] = {
@@ -34,6 +42,8 @@ LATENT_REASONING_BACKENDS: dict[str, LatentReasoningBackendSpec] = {
         default_think_close_token_id=248069,
         default_max_internal_tokens=1200,
         capture_inputs_embeds_env="LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS",
+        adapter_module="vllm.model_executor.models.qwen3_5_latent_mtp",
+        adapter_class="Qwen3_5LatentMTP",
     )
 }
 SUPPORTED_LATENT_REASONING_BACKENDS = frozenset(LATENT_REASONING_BACKENDS)

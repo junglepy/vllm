@@ -16,6 +16,10 @@ def test_backend_registry_exposes_qwen35_defaults():
     assert spec.default_think_close_token_id == 248069
     assert spec.default_max_internal_tokens == 1200
     assert spec.capture_inputs_embeds_env == "LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS"
+    assert (
+        spec.adapter_qualname
+        == "vllm.model_executor.models.qwen3_5_latent_mtp.Qwen3_5LatentMTP"
+    )
     assert latent_reasoning_capture_env_names({"qwen35_mtp"}) == {
         "LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS"
     }
