@@ -1099,8 +1099,11 @@ class Scheduler(SchedulerInterface):
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
             num_computed_tokens.append(req.num_computed_tokens)
+            # Worker-side cached state must track all generated positions,
+            # including latent internal tokens that are intentionally hidden
+            # from client-visible output_token_ids.
             num_output_tokens.append(
-                req.num_output_tokens + req.num_output_placeholders
+                req.num_tokens - req.num_prompt_tokens + req.num_output_placeholders
             )
 
         return CachedRequestData(
