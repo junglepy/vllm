@@ -1834,7 +1834,7 @@ class GPUModelRunner(
         if group_slot_mapping is None:
             return
 
-        entries: list[tuple[int, int, int, int, torch.Tensor, str, int]] = []
+        entries: list[tuple[int, int, int, int, torch.Tensor]] = []
         req_indices_np = self.latent_qwen35_last_req_indices_np
         positions_np = self.latent_qwen35_last_positions_np
         for slot in range(total_num_scheduled_tokens):
@@ -1844,12 +1844,12 @@ class GPUModelRunner(
             pending = self.latent_qwen35_pending_by_req_pos.get((req_id, pos))
             if pending is None:
                 continue
-            token_id, prev_hidden, checkpoint = pending
+            token_id, prev_hidden, _checkpoint = pending
             req_state = self.requests[req_id]
             head = self._ensure_latent_qwen35_native_head(req_state.sampling_params)
             if head is None:
                 continue
-            entries.append((req_idx, slot, pos, token_id, prev_hidden, checkpoint, len(entries)))
+            entries.append((req_idx, slot, pos, token_id, prev_hidden))
 
         if not entries:
             return
@@ -1864,11 +1864,18 @@ class GPUModelRunner(
             dtype=torch.int32,
             device=self.device,
         )
-        compact_positions = torch.tensor(
-            [item[2] for item in entries],
-            dtype=torch.int64,
-            device=self.device,
-        )
+        if all_slots_latent:
+            compact_positions = torch.as_tensor(
+                positions_np[:total_num_scheduled_tokens],
+                dtype=torch.int64,
+                device=self.device,
+            )
+        else:
+            compact_positions = torch.tensor(
+                [item[2] for item in entries],
+                dtype=torch.int64,
+                device=self.device,
+            )
         compact_hidden = torch.stack([item[4] for item in entries]).to(
             device=self.device,
             dtype=self.dtype,
@@ -1921,7 +1928,7 @@ class GPUModelRunner(
             self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(token_embeds)
             self.inputs_embeds.gpu[scheduled_slots] = embeds
         for item in entries:
-            req_idx, _slot, pos, _token_id, _prev_hidden, _checkpoint, _ = item
+            req_idx, _slot, pos, _token_id, _prev_hidden = item
             req_id = self.input_batch.req_ids[req_idx]
             self.latent_qwen35_pending_by_req_pos.pop((req_id, pos), None)
         self.latent_qwen35_use_inputs_embeds = True
@@ -2026,11 +2033,18 @@ class GPUModelRunner(
                 device=self.device,
                 dtype=self.dtype,
             )
-        compact_positions = torch.tensor(
-            [item[2] for item in entries],
-            dtype=torch.int64,
-            device=self.device,
-        )
+        if all_slots_latent:
+            compact_positions = torch.as_tensor(
+                positions_np[:total_num_scheduled_tokens],
+                dtype=torch.int64,
+                device=self.device,
+            )
+        else:
+            compact_positions = torch.tensor(
+                [item[2] for item in entries],
+                dtype=torch.int64,
+                device=self.device,
+            )
 
         req_indices: list[int] = []
         query_lens: list[int] = []
