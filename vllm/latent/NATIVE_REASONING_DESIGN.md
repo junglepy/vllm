@@ -78,6 +78,23 @@ sampled token IDs on GPU and schedules the next step before CPU output handling.
 For latent mode, the next input must be the MTP embedding, not the ordinary token
 embedding.
 
+The relevant current code path is:
+
+1. `GPUModelRunner.execute_model` samples token IDs and, in async mode, stores
+   them in `input_batch.prev_sampled_token_ids`.
+2. `GPUModelRunner._prepare_input_ids` copies `prev_sampled_token_ids` into the
+   next step's `input_ids` GPU buffer.
+3. `Scheduler.schedule` advances `request.num_computed_tokens` before
+   `Scheduler.update_from_output` receives the async output.
+4. `Scheduler.update_from_output` can append `internal_token_ids` after the
+   async output is materialized, but at that point the next step may already have
+   been prepared from token IDs rather than latent embeddings.
+
+This means a hybrid patch that only runs latent bookkeeping inside
+`_bookkeeping_sync` while leaving `prev_sampled_token_ids` as the next-step
+source would be a silent correctness bug: request accounting and KV progression
+would advance, but the model would consume token embeddings for latent steps.
+
 The correct staged refactor is:
 
 1. Keep public API on native reasoning fields.
