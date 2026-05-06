@@ -17,9 +17,7 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
@@ -27,12 +25,10 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.qwen3_5_mtp import Qwen3_5MultiTokenPredictor
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
     _merge_multimodal_embeddings,
-    is_pp_missing_parameter,
 )
 from vllm.sequence import IntermediateTensors
-
-logger = init_logger(__name__)
 
 
 @support_torch_compile(
@@ -109,13 +105,33 @@ class Qwen3_5LatentMTP(nn.Module, SupportsMultiModal):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        return self.model(
-            input_ids=input_ids,
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is None:
+                inputs_embeds = self.model.embed_input_ids(input_ids)
+            assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
+            inputs_embeds = self.model.pre_fc_norm_embedding(inputs_embeds)
+            hidden_states = self.model.pre_fc_norm_hidden(hidden_states)
+            hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
+            hidden_states = self.model.fc(hidden_states)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        hidden_states, residual = self.model.layers[0](
             positions=positions,
             hidden_states=hidden_states,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
+            residual=residual,
         )
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+
+        hidden_states, _ = self.model.norm(hidden_states, residual)
+        return hidden_states
 
     def compute_latent_embeds(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         if not get_pp_group().is_last_rank:
@@ -123,28 +139,8 @@ class Qwen3_5LatentMTP(nn.Module, SupportsMultiModal):
         return self.to_embed(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in self._remap_latent_checkpoint_weights(weights):
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-            if name not in params_dict:
-                logger.warning_once(
-                    "Parameter %s not found in Qwen3_5LatentMTP, skip loading",
-                    name,
-                )
-                continue
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(self._remap_latent_checkpoint_weights(weights))
 
     @staticmethod
     def _remap_latent_checkpoint_weights(

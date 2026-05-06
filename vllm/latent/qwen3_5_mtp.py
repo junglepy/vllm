@@ -124,6 +124,7 @@ class Qwen35MTPCore(nn.Module):
         cfg.num_hidden_layers = 1
         cfg.full_attention_interval = 1
         cfg.layer_types = ["full_attention"]
+        cfg._attn_implementation = "sdpa"
         self.config = cfg
 
         self.embed_tokens = embed_tokens
@@ -236,8 +237,6 @@ def build_standalone_latent_head(
             "Latent checkpoint key mismatch: "
             f"missing={missing[:20]} unexpected={unexpected[:20]}"
         )
-    head.core.config._attn_implementation = "eager"
-    head.core.layer.self_attn.config._attn_implementation = "eager"
     head.eval()
     return head
 
