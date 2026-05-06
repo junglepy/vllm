@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from vllm.entrypoints.cli.types import CLISubcommand
+from vllm.latent.config import (
+    QWEN35_MTP_BACKEND,
+    SUPPORTED_LATENT_REASONING_BACKENDS,
+    get_latent_reasoning_backend_spec,
+)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -39,14 +44,20 @@ def _row_prompt(row: dict[str, Any], field: str) -> str:
     )
 
 
-class LatentQwen35Subcommand(CLISubcommand):
-    """Run Qwen3.5 latent-MTP generation through the vLLM engine."""
+class LatentReasoningSubcommand(CLISubcommand):
+    """Run latent-reasoning generation through the vLLM engine."""
 
-    name = "latent-qwen35"
+    name = "latent-reasoning"
+    help_text = "Run latent-reasoning generation through the vLLM engine."
+    description = "Run latent-reasoning generation for latent-mimo checkpoints."
+    usage = "vllm latent-reasoning --model MODEL --checkpoint CKPT --prompt '...'"
+    output_key = "latent_reasoning"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        os.environ.setdefault("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS", "1")
+        backend_spec = get_latent_reasoning_backend_spec(args.backend)
+        if backend_spec.capture_inputs_embeds_env:
+            os.environ.setdefault(backend_spec.capture_inputs_embeds_env, "1")
 
         from transformers import AutoTokenizer
 
@@ -95,7 +106,8 @@ class LatentQwen35Subcommand(CLISubcommand):
             top_p=args.top_p,
             max_tokens=args.max_visible_tokens,
             extra_args={
-                "latent_qwen35": {
+                "latent_reasoning": {
+                    "backend": args.backend,
                     "checkpoint": args.checkpoint,
                     "think_close_token_id": args.think_close_token_id,
                     "max_internal_tokens": args.max_internal_tokens,
@@ -117,7 +129,9 @@ class LatentQwen35Subcommand(CLISubcommand):
             total_visible += visible_tokens
             total_internal += internal_tokens
             rec = dict(row)
-            rec["latent_qwen35"] = {
+            rec[args.latent_output_key] = {
+                "backend": args.backend,
+                "checkpoint": args.checkpoint,
                 "text": completion.text,
                 "token_ids": list(completion.token_ids),
                 "visible_tokens": visible_tokens,
@@ -151,12 +165,18 @@ class LatentQwen35Subcommand(CLISubcommand):
 
         parser = subparsers.add_parser(
             self.name,
-            help="Run Qwen3.5 latent-MTP generation through the vLLM engine.",
-            description="Run latent-switch generation for latent-mimo Qwen3.5 checkpoints.",
-            usage="vllm latent-qwen35 --model MODEL --checkpoint CKPT --prompt '...'",
+            help=self.help_text,
+            description=self.description,
+            usage=self.usage,
         )
-        parser.add_argument("--model", required=True, help="Path or HF id for Qwen3.5")
+        parser.add_argument("--model", required=True, help="Path or HF id for the base model")
         parser.add_argument("--checkpoint", required=True, help="Latent head checkpoint .pt")
+        parser.add_argument(
+            "--backend",
+            choices=sorted(SUPPORTED_LATENT_REASONING_BACKENDS),
+            default=QWEN35_MTP_BACKEND,
+            help="Latent reasoning backend to use.",
+        )
         parser.add_argument("--prompt", default="", help="Single prompt when --input-jsonl is omitted")
         parser.add_argument("--input-jsonl", default=None, help="Optional input JSONL")
         parser.add_argument("--output-jsonl", default=None, help="Optional output JSONL")
@@ -176,9 +196,20 @@ class LatentQwen35Subcommand(CLISubcommand):
         parser.add_argument("--no-trust-remote-code", action="store_true")
         parser.add_argument("--enforce-eager", action="store_true")
         parser.add_argument("--no-tqdm", action="store_true")
+        parser.set_defaults(latent_output_key=self.output_key)
         parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
         return parser
 
 
+class LatentQwen35Subcommand(LatentReasoningSubcommand):
+    """Backward-compatible alias for the Qwen3.5 latent-MTP backend."""
+
+    name = "latent-qwen35"
+    help_text = "Run Qwen3.5 latent-MTP generation through the vLLM engine."
+    description = "Run latent-switch generation for latent-mimo Qwen3.5 checkpoints."
+    usage = "vllm latent-qwen35 --model MODEL --checkpoint CKPT --prompt '...'"
+    output_key = "latent_qwen35"
+
+
 def cmd_init() -> list[CLISubcommand]:
-    return [LatentQwen35Subcommand()]
+    return [LatentReasoningSubcommand(), LatentQwen35Subcommand()]
