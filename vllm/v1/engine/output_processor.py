@@ -371,6 +371,7 @@ class RequestState:
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
+            latent_internal_token_count=engine_core_output.latent_internal_token_count,
         )
 
     def _new_completion_output(

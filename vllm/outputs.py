@@ -119,6 +119,7 @@ class RequestOutput:
         encoder_prompt: str | None = None,
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
+        latent_internal_token_count: int = 0,
         *,
         kv_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
@@ -140,6 +141,7 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
+        self.latent_internal_token_count = latent_internal_token_count
         self.kv_transfer_params = kv_transfer_params
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
@@ -184,7 +186,8 @@ class RequestOutput:
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "
             f"lora_request={self.lora_request}, "
-            f"num_cached_tokens={self.num_cached_tokens})"
+            f"num_cached_tokens={self.num_cached_tokens}, "
+            f"latent_internal_token_count={self.latent_internal_token_count})"
         )
 
 

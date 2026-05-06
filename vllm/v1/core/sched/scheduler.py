@@ -1490,6 +1490,9 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        latent_internal_token_count=len(
+                            request.latent_internal_token_ids
+                        ),
                     )
                 )
             else:
