@@ -1,26 +1,69 @@
-# Qwen3.5 latent-MTP runtime
+# Qwen3.5 latent-MTP vLLM runtime
 
-This fork contains an experimental local runtime for latent-mimo Qwen3.5
-checkpoints.
+This fork adds a vLLM V1 decode path for latent-mimo Qwen3.5 checkpoints.
 
-The runtime keeps the same latent-switch semantics used by the training/eval
-scripts:
+Runtime semantics:
 
-1. prefill the Qwen3.5 text backbone on the chat prompt;
-2. run the trained one-layer MTP head on the prompt hidden states;
-3. while the model is inside `<think>`, replace visible reasoning tokens with
-   projected latent embeddings and advance the target KV cache internally;
-4. when the next token predicted by the target logits is `</think>`, switch back
-   to ordinary token generation and return only visible output tokens.
+1. the request starts in latent mode inside `<think>`;
+2. while latent mode is active and the sampled token is not `</think>`, vLLM
+   treats the sampled token as an internal token: it advances sequence/KV state
+   but is not returned to the client;
+3. the trained one-layer MTP head maps `(sampled_token_id, target_hidden_state)`
+   to a continuous embedding for the next decode position;
+4. the next target-model step uses that latent embedding through vLLM's
+   `inputs_embeds` path instead of the ordinary token embedding;
+5. when `</think>` is sampled, generation switches back to normal visible token
+   generation.
 
-The entry point is:
+The vLLM integration uses `SamplingParams.extra_args["latent_qwen35"]`:
+
+```python
+from transformers import AutoTokenizer
+from vllm import LLM, SamplingParams
+
+model = "/workspace/latent-mimo/qwen35_27b_tests/models/Qwen3.5-27B"
+checkpoint = "/workspace/latent-mimo/deploy_archives/checkpoint_step1500_NEW.pt"
+
+tok = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+prompt = tok.apply_chat_template(
+    [{"role": "user", "content": "What is 12 + 30?"}],
+    tokenize=False,
+    add_generation_prompt=True,
+    enable_thinking=True,
+)
+llm = LLM(
+    model=model,
+    dtype="bfloat16",
+    trust_remote_code=True,
+    max_model_len=512,
+    async_scheduling=False,
+)
+params = SamplingParams(
+    temperature=0.0,
+    max_tokens=64,
+    extra_args={
+        "latent_qwen35": {
+            "checkpoint": checkpoint,
+            "think_close_token_id": 248069,
+            "max_internal_tokens": 1200,
+        }
+    },
+)
+out = llm.generate([prompt], params)[0]
+print(out.outputs[0].text)
+print(out.latent_internal_token_count)
+```
+
+CLI:
 
 ```bash
 vllm latent-qwen35 \
   --model /workspace/latent-mimo/qwen35_27b_tests/models/Qwen3.5-27B \
   --checkpoint /workspace/latent-mimo/deploy_archives/checkpoint_step1500_NEW.pt \
-  --prompt "What is 2+2?" \
-  --max-total-steps 1200
+  --prompt "What is 12 + 30?" \
+  --max-model-len 512 \
+  --max-visible-tokens 64 \
+  --max-internal-tokens 1200
 ```
 
 For JSONL batches:
@@ -35,16 +78,25 @@ vllm latent-qwen35 \
   --limit 50
 ```
 
-The JSON output includes `total_steps_per_s`, `latent_steps_per_s`, and
-`visible_tokens_per_s`. `total_steps_per_s` is the relevant throughput metric for
-latent mode because latent steps advance the KV cache but are intentionally not
-detokenized.
+The output includes `latent_internal_token_count`. For latent mode, the relevant
+throughput metric is usually:
 
-Current limitation: the first runnable entry point is a named vLLM runtime module
-and CLI. The model-side head is also registered as the
-`Qwen3_5LatentMTP` vLLM model-executor architecture, with checkpoint-key remapping
-for latent-mimo `core.*` / `to_embed.*` weights. The remaining integration step is
-the production scheduler loop: vLLM's request scheduler assumes every decode slot
-corresponds to a request-owned token id, while latent mode advances the target KV
-cache with continuous internal embeddings that must not be surfaced as output
-tokens.
+```text
+(visible output tokens + latent_internal_token_count) / elapsed_seconds
+```
+
+Known constraints in this branch:
+
+- latent mode currently requires `async_scheduling=False` because the internal
+  token bookkeeping updates worker state synchronously;
+- the MTP head is loaded as a worker-side module from the latent-mimo `.pt`
+  checkpoint;
+- `max_internal_tokens` is enforced separately from vLLM `max_tokens`, because
+  vLLM `max_tokens` counts visible output tokens only.
+
+Smoke result on B200 with `checkpoint_step1500_NEW.pt`, compiled vLLM path,
+`max_model_len=512`, `async_scheduling=False`:
+
+```text
+visible=13, internal=162, total_steps=175, warm total_steps_per_s ~= 67.8
+```

@@ -1187,6 +1187,9 @@ class GPUModelRunner(
                         req_state.latent_qwen35_think_close_token_id = int(
                             latent_cfg.get("think_close_token_id", 248069)
                         )
+                        req_state.latent_qwen35_max_internal_tokens = int(
+                            latent_cfg.get("max_internal_tokens", 1200)
+                        )
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
@@ -3660,6 +3663,18 @@ class GPUModelRunner(
                     continue
                 token_id = int(sampled_ids[0])
                 if token_id == int(req_state.latent_qwen35_think_close_token_id):
+                    req_state.latent_qwen35_active = False
+                    continue
+                num_internal_tokens = (
+                    len(req_state.latent_qwen35_internal_positions)
+                    if req_state.latent_qwen35_internal_positions is not None
+                    else 0
+                )
+                if (
+                    req_state.latent_qwen35_max_internal_tokens >= 0
+                    and num_internal_tokens
+                    >= req_state.latent_qwen35_max_internal_tokens
+                ):
                     req_state.latent_qwen35_active = False
                     continue
                 start_idx = int(self.input_batch.num_tokens_no_spec[req_idx])
