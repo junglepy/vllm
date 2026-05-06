@@ -683,6 +683,10 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 def _enable_latent_qwen35_defaults(args: Namespace) -> None:
     if getattr(args, "latent_qwen35_modules", None):
         os.environ.setdefault("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS", "1")
+        # The current Qwen latent path mutates worker-side request state during
+        # decode bookkeeping, so keep the server on the synchronous scheduler
+        # unless/until latent bookkeeping is moved into the async-safe path.
+        args.async_scheduling = False
 
 
 async def run_server_worker(

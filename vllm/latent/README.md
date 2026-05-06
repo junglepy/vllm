@@ -94,7 +94,8 @@ The base alias uses ordinary vLLM decoding. A latent alias injects
 `SamplingParams.extra_args["latent_qwen35"]` before scheduling the request.
 When `--latent-qwen35-modules` is provided, the OpenAI-compatible server sets
 `LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS=1` by default unless the operator already
-set it explicitly.
+set it explicitly, and forces `async_scheduling=False` for correctness with the
+current worker-side latent bookkeeping.
 
 CLI:
 
@@ -130,7 +131,9 @@ throughput metric is usually:
 Known constraints in this branch:
 
 - latent mode currently requires `async_scheduling=False` because the internal
-  token bookkeeping updates worker state synchronously;
+  token bookkeeping updates worker state synchronously. The dedicated
+  `vllm latent-qwen35` CLI and OpenAI-compatible latent aliases set this
+  automatically;
 - MTP heads are loaded lazily as worker-side modules from latent-mimo `.pt`
   checkpoints and cached by checkpoint path;
 - `max_internal_tokens` is enforced separately from vLLM `max_tokens`, because

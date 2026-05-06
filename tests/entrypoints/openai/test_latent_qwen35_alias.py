@@ -120,33 +120,35 @@ def test_latent_qwen35_module_to_extra_args():
 
 def test_latent_qwen35_server_sets_capture_env(monkeypatch):
     monkeypatch.delenv("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS", raising=False)
-
-    _enable_latent_qwen35_defaults(
-        Namespace(
-            latent_qwen35_modules=[
-                LatentQwen35ModulePath(
-                    name="latent-step5500",
-                    path="/path/to/step5500.pt",
-                )
-            ]
-        )
+    args = Namespace(
+        async_scheduling=True,
+        latent_qwen35_modules=[
+            LatentQwen35ModulePath(
+                name="latent-step5500",
+                path="/path/to/step5500.pt",
+            )
+        ],
     )
 
+    _enable_latent_qwen35_defaults(args)
+
     assert os.environ["LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS"] == "1"
+    assert args.async_scheduling is False
 
 
 def test_latent_qwen35_server_preserves_existing_capture_env(monkeypatch):
     monkeypatch.setenv("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS", "0")
-
-    _enable_latent_qwen35_defaults(
-        Namespace(
-            latent_qwen35_modules=[
-                LatentQwen35ModulePath(
-                    name="latent-step5500",
-                    path="/path/to/step5500.pt",
-                )
-            ]
-        )
+    args = Namespace(
+        async_scheduling=None,
+        latent_qwen35_modules=[
+            LatentQwen35ModulePath(
+                name="latent-step5500",
+                path="/path/to/step5500.pt",
+            )
+        ],
     )
 
+    _enable_latent_qwen35_defaults(args)
+
     assert os.environ["LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS"] == "0"
+    assert args.async_scheduling is False
