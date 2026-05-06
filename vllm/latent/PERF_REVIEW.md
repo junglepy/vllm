@@ -214,6 +214,20 @@ Decode step:
 
 Этапы 2 (python/list/dict/host→device overhead) и 5 (bookkeeping) — основные мишени оптимизации. Этап 3 (сам text_backbone forward) и `head.forward` внутри 2 — уже компилируемы через torch.compile + PagedAttention, проблем там нет. Ранее заявленный `per-request int(...) GPU sync` надо считать неподтверждённым до отдельного профиля.
 
+
+## Обновление: raw torch.compile для native MTP head
+
+Проверка показала, что `Qwen3_5LatentMTP` нельзя безопасно вызывать через `head(...)` / `@support_torch_compile` wrapper из текущего worker hot path: этот путь падает на `CUDA graph capturing detected at an inappropriate time`.
+
+Рабочий вариант: компилировать именно `head.forward` через raw `torch.compile(head.forward, dynamic=True, fullgraph=False)` после загрузки checkpoint. В fork это включено по умолчанию с fallback на eager `head.forward` при ошибке.
+
+Эффект на synthetic warmup benchmark:
+- batch=5: latent вырос до `327.9 steps/s`, overhead снизился до `~17.3%`;
+- batch=20: base `1251 tok/s`, latent `1027 steps/s`, overhead `~21.8%`;
+- `mtp_forward p50`: примерно `2.10 ms -> 1.67 ms`.
+
+Вывод: ближайший подтвержденный bottleneck был eager MTP head forward, а не scheduler/bookkeeping.
+
 ## Рекомендуемая последовательность
 
 1. Держать исправленный benchmark как базовый: full warmup, repeats, best/median steady-state, отдельные JSON artifacts.

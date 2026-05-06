@@ -725,8 +725,17 @@ class GPUModelRunner(
         ] = {}
         self.latent_qwen35_heads: dict[str, torch.nn.Module] = {}
         self.latent_qwen35_native_head: torch.nn.Module | None = None
+        self.latent_qwen35_native_forward: Callable[..., Any] | None = None
+        self.latent_qwen35_native_forward_compiled = False
         self.latent_qwen35_native_checkpoint: str | None = None
         self.latent_qwen35_native_layer_names: tuple[str, ...] = ()
+        self.latent_qwen35_native_attn_group_cache: tuple[
+            int, AttentionGroup, str
+        ] | None = None
+        self.latent_qwen35_query_start_cache: dict[
+            int, tuple[torch.Tensor, torch.Tensor]
+        ] = {}
+        self.latent_qwen35_false_prefill_cache: dict[int, torch.Tensor] = {}
         self.latent_qwen35_last_req_indices_np: np.ndarray | None = None
         self.latent_qwen35_last_positions_np: np.ndarray | None = None
         self.latent_qwen35_mtp_caches: dict[str, object] = {}
@@ -2160,6 +2169,17 @@ class GPUModelRunner(
         head.load_weights(state.items())  # type: ignore[attr-defined]
         head.to(device=self.device, dtype=self.dtype)
         head.eval()
+        compile_head = os.getenv("LATENT_QWEN35_COMPILE_HEAD_FORWARD", "1") != "0"
+        if compile_head:
+            self.latent_qwen35_native_forward = torch.compile(
+                head.forward,
+                dynamic=True,
+                fullgraph=False,
+            )
+            self.latent_qwen35_native_forward_compiled = True
+        else:
+            self.latent_qwen35_native_forward = head.forward
+            self.latent_qwen35_native_forward_compiled = False
         self.latent_qwen35_native_checkpoint = checkpoint
         return head
 
@@ -2285,11 +2305,18 @@ class GPUModelRunner(
         return head.to_embed(mtp_hidden).squeeze(0).squeeze(0).detach()
 
     def _get_latent_qwen35_native_attn_group(self) -> tuple[int, AttentionGroup, str] | None:
+        if self.latent_qwen35_native_attn_group_cache is not None:
+            return self.latent_qwen35_native_attn_group_cache
         for layer_name in self.latent_qwen35_native_layer_names:
             for gid, attn_groups in enumerate(self.attn_groups):
                 for attn_group in attn_groups:
                     if layer_name in attn_group.layer_names:
-                        return gid, attn_group, layer_name
+                        self.latent_qwen35_native_attn_group_cache = (
+                            gid,
+                            attn_group,
+                            layer_name,
+                        )
+                        return self.latent_qwen35_native_attn_group_cache
         return None
 
     def _build_latent_qwen35_native_metadata(
@@ -2310,12 +2337,26 @@ class GPUModelRunner(
         if num_reqs == 0 or num_tokens == 0:
             return None
 
-        query_start_cpu = torch.zeros(num_reqs + 1, dtype=torch.int32)
-        query_start_cpu[1:] = torch.cumsum(
-            torch.tensor(query_lens, dtype=torch.int32), dim=0
-        )
-        query_start_gpu = query_start_cpu.to(device=self.device, non_blocking=True)
-        req_idx_tensor = torch.tensor(req_indices, dtype=torch.long, device=self.device)
+        decode_only = all(qlen == 1 for qlen in query_lens)
+        req_indices_are_contiguous = req_indices == list(range(num_reqs))
+        if decode_only:
+            cached_query_start = self.latent_qwen35_query_start_cache.get(num_reqs)
+            if cached_query_start is None:
+                query_start_cpu = torch.arange(num_reqs + 1, dtype=torch.int32)
+                query_start_gpu = query_start_cpu.to(
+                    device=self.device,
+                    non_blocking=True,
+                )
+                cached_query_start = (query_start_cpu, query_start_gpu)
+                self.latent_qwen35_query_start_cache[num_reqs] = cached_query_start
+            else:
+                query_start_cpu, query_start_gpu = cached_query_start
+        else:
+            query_start_cpu = torch.zeros(num_reqs + 1, dtype=torch.int32)
+            query_start_cpu[1:] = torch.cumsum(
+                torch.tensor(query_lens, dtype=torch.int32), dim=0
+            )
+            query_start_gpu = query_start_cpu.to(device=self.device, non_blocking=True)
 
         kv_cache_spec = self.kv_cache_config.kv_cache_groups[gid].kv_cache_spec
         if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
@@ -2323,17 +2364,36 @@ class GPUModelRunner(
         block_table = self.input_batch.block_table[gid].get_device_tensor(
             self.input_batch.num_reqs
         )
-        block_table_tensor = block_table.index_select(0, req_idx_tensor)
-        seq_lens_tensor = torch.tensor(
-            seq_lens,
-            dtype=torch.int32,
-            device=self.device,
-        )
-        is_prefilling = torch.tensor(
-            [qlen > 1 for qlen in query_lens],
-            dtype=torch.bool,
-            device=self.device,
-        )
+        if req_indices_are_contiguous:
+            block_table_tensor = block_table[:num_reqs]
+        else:
+            req_idx_tensor = torch.tensor(
+                req_indices,
+                dtype=torch.long,
+                device=self.device,
+            )
+            block_table_tensor = block_table.index_select(0, req_idx_tensor)
+        if decode_only:
+            seq_lens_tensor = positions.to(dtype=torch.int32) + 1
+            is_prefilling = self.latent_qwen35_false_prefill_cache.get(num_reqs)
+            if is_prefilling is None:
+                is_prefilling = torch.zeros(
+                    num_reqs,
+                    dtype=torch.bool,
+                    device=self.device,
+                )
+                self.latent_qwen35_false_prefill_cache[num_reqs] = is_prefilling
+        else:
+            seq_lens_tensor = torch.tensor(
+                seq_lens,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            is_prefilling = torch.tensor(
+                [qlen > 1 for qlen in query_lens],
+                dtype=torch.bool,
+                device=self.device,
+            )
         cm = CommonAttentionMetadata(
             query_start_loc=query_start_gpu,
             query_start_loc_cpu=query_start_cpu,
@@ -2397,11 +2457,28 @@ class GPUModelRunner(
             batch_descriptor=BatchDescriptor(num_tokens=int(input_ids.shape[0])),
             slot_mapping=slot_mappings,
         ):
-            mtp_hidden = head.forward(
-                input_ids=input_ids,
-                positions=positions,
-                hidden_states=hidden_states,
-            )
+            forward = self.latent_qwen35_native_forward or head.forward
+            try:
+                mtp_hidden = forward(
+                    input_ids=input_ids,
+                    positions=positions,
+                    hidden_states=hidden_states,
+                )
+            except Exception:
+                if not self.latent_qwen35_native_forward_compiled:
+                    raise
+                logger.warning_once(
+                    "Compiled Qwen3.5 latent MTP forward failed. Falling "
+                    "back to eager head.forward for this engine instance.",
+                    exc_info=True,
+                )
+                self.latent_qwen35_native_forward = head.forward
+                self.latent_qwen35_native_forward_compiled = False
+                mtp_hidden = head.forward(
+                    input_ids=input_ids,
+                    positions=positions,
+                    hidden_states=hidden_states,
+                )
         if profile_path and start_event is not None and end_event is not None:
             end_event.record()
             end_event.synchronize()
