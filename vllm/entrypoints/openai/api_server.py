@@ -57,6 +57,7 @@ from vllm.entrypoints.utils import (
 from vllm.latent.config import (
     QWEN35_MTP_BACKEND,
     latent_reasoning_capture_env_names,
+    latent_reasoning_requires_sync_scheduling,
 )
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -698,17 +699,23 @@ def _latent_reasoning_module_backends(args: Namespace) -> set[str]:
 
 def _enable_latent_reasoning_defaults(args: Namespace) -> None:
     backends = _latent_reasoning_module_backends(args)
-    if backends:
-        for env_name in latent_reasoning_capture_env_names(backends):
-            os.environ.setdefault(env_name, "1")
-        # The current latent path mutates worker-side request state during decode
-        # bookkeeping, so keep the server on the synchronous scheduler unless
-        # latent bookkeeping is moved into the async-safe path.
+    if not backends:
+        return
+
+    for env_name in latent_reasoning_capture_env_names(backends):
+        os.environ.setdefault(env_name, "1")
+
+    # The Qwen3.5-MTP backend currently mutates worker-side request state during
+    # decode bookkeeping. Async scheduling reuses prev_sampled_token_ids as the
+    # next token input before CPU output handling; latent mode instead needs the
+    # MTP-produced continuous embedding as the next input.
+    if latent_reasoning_requires_sync_scheduling(backends):
         if getattr(args, "async_scheduling", False):
             logger.warning(
-                "Latent reasoning modules require async_scheduling=False in "
-                "the current implementation; overriding async_scheduling for "
-                "correct latent next-embedding transitions."
+                "At least one latent reasoning backend requires "
+                "async_scheduling=False in the current implementation; "
+                "overriding async_scheduling for correct latent next-embedding "
+                "transitions."
             )
         args.async_scheduling = False
 

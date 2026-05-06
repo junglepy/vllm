@@ -53,7 +53,10 @@ from vllm.forward_context import (
     set_forward_context,
 )
 from vllm.logger import init_logger
-from vllm.latent.config import normalize_latent_reasoning_config
+from vllm.latent.config import (
+    get_latent_reasoning_backend_spec,
+    normalize_latent_reasoning_config,
+)
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -2215,9 +2218,16 @@ class GPUModelRunner(
             None if sampling_params is None else sampling_params.extra_args
         )
         if latent_cfg is not None and self.use_async_scheduling:
+            backend = str(latent_cfg["backend"])
+            spec = get_latent_reasoning_backend_spec(backend)
+            if spec.supports_async_scheduling:
+                return latent_cfg
             raise ValueError(
-                "Latent reasoning currently requires async_scheduling=False. "
-                "Use a latent model alias through vllm serve, or construct "
+                f"Latent reasoning backend {backend!r} currently requires "
+                "async_scheduling=False. Async scheduling prepares the next "
+                "decode input from prev_sampled_token_ids, while this backend "
+                "must feed an MTP-produced continuous embedding. Use a latent "
+                "model alias through vllm serve, or construct "
                 "LLM(..., async_scheduling=False) for offline inference."
             )
         return latent_cfg

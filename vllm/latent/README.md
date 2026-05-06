@@ -151,7 +151,7 @@ Known constraints in this branch:
 - latent mode currently requires `async_scheduling=False` because the internal
   token bookkeeping updates worker state synchronously. The dedicated
   `vllm latent-qwen35` CLI and OpenAI-compatible latent aliases set this
-  automatically;
+  automatically for backends that declare `supports_async_scheduling=False`;
 - MTP heads are loaded lazily as worker-side modules from latent-mimo `.pt`
   checkpoints and cached by checkpoint path;
 - `max_internal_tokens` is enforced separately from vLLM `max_tokens`, because

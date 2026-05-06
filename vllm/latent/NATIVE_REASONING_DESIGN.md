@@ -50,7 +50,8 @@ Already in this branch:
 - backend registry exists in `vllm.latent.config` with `qwen35_mtp`;
 - backend specs include the execution adapter entrypoint
   (`vllm.model_executor.models.qwen3_5_latent_mtp.Qwen3_5LatentMTP`) and own
-  backend defaults for close token / max internal tokens;
+  backend defaults for close token / max internal tokens / async scheduling
+  capability;
 - Qwen3.5 MTP head is loaded as a native vLLM module and cached by checkpoint;
 - native usage fields report latent internal steps as `reasoning_tokens`;
 - server smoke artifact exists under
@@ -61,7 +62,8 @@ Already in this branch:
 
 Still not done:
 
-- `async_scheduling=True` is intentionally rejected for latent requests;
+- `async_scheduling=True` is intentionally rejected for `qwen35_mtp` latent
+  requests because this backend declares `supports_async_scheduling=False`;
 - latent mode state is still updated in worker-side Python bookkeeping;
 - worker internals still use `latent_qwen35_*` names in several places;
 - worker internals do not yet dispatch through a generic backend class; the

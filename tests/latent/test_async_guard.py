@@ -19,7 +19,7 @@ def test_latent_reasoning_rejects_async_scheduling():
         },
     )
 
-    with pytest.raises(ValueError, match="async_scheduling=False"):
+    with pytest.raises(ValueError, match="qwen35_mtp.*async_scheduling=False"):
         runner._get_latent_qwen35_config(params)
 
 

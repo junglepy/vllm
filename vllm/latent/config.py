@@ -28,6 +28,7 @@ class LatentReasoningBackendSpec:
     capture_inputs_embeds_env: str | None = None
     adapter_module: str | None = None
     adapter_class: str | None = None
+    supports_async_scheduling: bool = False
 
     @property
     def adapter_qualname(self) -> str | None:
@@ -72,6 +73,13 @@ def latent_reasoning_capture_env_names(
         if spec.capture_inputs_embeds_env:
             names.add(spec.capture_inputs_embeds_env)
     return names
+
+
+def latent_reasoning_requires_sync_scheduling(backends: set[str]) -> bool:
+    return any(
+        not get_latent_reasoning_backend_spec(backend).supports_async_scheduling
+        for backend in backends
+    )
 
 
 def normalize_latent_reasoning_config(

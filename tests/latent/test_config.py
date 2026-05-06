@@ -6,6 +6,7 @@ import pytest
 from vllm.latent.config import (
     get_latent_reasoning_backend_spec,
     latent_reasoning_capture_env_names,
+    latent_reasoning_requires_sync_scheduling,
     normalize_latent_reasoning_config,
 )
 
@@ -16,6 +17,7 @@ def test_backend_registry_exposes_qwen35_defaults():
     assert spec.default_think_close_token_id == 248069
     assert spec.default_max_internal_tokens == 1200
     assert spec.capture_inputs_embeds_env == "LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS"
+    assert spec.supports_async_scheduling is False
     assert (
         spec.adapter_qualname
         == "vllm.model_executor.models.qwen3_5_latent_mtp.Qwen3_5LatentMTP"
@@ -23,6 +25,7 @@ def test_backend_registry_exposes_qwen35_defaults():
     assert latent_reasoning_capture_env_names({"qwen35_mtp"}) == {
         "LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS"
     }
+    assert latent_reasoning_requires_sync_scheduling({"qwen35_mtp"}) is True
 
 
 def test_normalize_latent_reasoning_config():
