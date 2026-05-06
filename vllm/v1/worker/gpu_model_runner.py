@@ -1898,6 +1898,9 @@ class GPUModelRunner(
         all_slots_latent = len(entries) == total_num_scheduled_tokens and all(
             item[1] == idx for idx, item in enumerate(entries)
         )
+        all_entries_req_contiguous = all(
+            item[0] == idx for idx, item in enumerate(entries)
+        )
         compact_input_ids = torch.tensor(
             [item[3] for item in entries],
             dtype=torch.int32,
@@ -1915,10 +1918,16 @@ class GPUModelRunner(
                 dtype=torch.int64,
                 device=self.device,
             )
-        compact_hidden = torch.stack([item[4] for item in entries]).to(
-            device=self.device,
-            dtype=self.dtype,
-        )
+        if all_slots_latent and all_entries_req_contiguous:
+            compact_hidden = pending_hidden_gpu[:total_num_scheduled_tokens].to(
+                device=self.device,
+                dtype=self.dtype,
+            )
+        else:
+            compact_hidden = torch.stack([item[4] for item in entries]).to(
+                device=self.device,
+                dtype=self.dtype,
+            )
         if all_slots_latent:
             scheduled_slots = None
             compact_slot_mapping = group_slot_mapping[:total_num_scheduled_tokens]
