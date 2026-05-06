@@ -723,6 +723,23 @@ class GPUModelRunner(
         self.latent_qwen35_pending_by_req_pos: dict[
             tuple[str, int], tuple[int, torch.Tensor, str]
         ] = {}
+        self.latent_qwen35_pending_req_ids: list[str | None] = [
+            None
+        ] * self.max_num_reqs
+        self.latent_qwen35_pending_token_ids_np = np.zeros(
+            self.max_num_reqs,
+            dtype=np.int32,
+        )
+        self.latent_qwen35_pending_positions_np = np.zeros(
+            self.max_num_reqs,
+            dtype=np.int64,
+        )
+        self.latent_qwen35_pending_hidden = self._make_buffer(
+            self.max_num_reqs,
+            self.inputs_embeds_size,
+            dtype=self.dtype,
+            numpy=False,
+        )
         self.latent_qwen35_heads: dict[str, torch.nn.Module] = {}
         self.latent_qwen35_native_head: torch.nn.Module | None = None
         self.latent_qwen35_native_forward: Callable[..., Any] | None = None
@@ -1105,6 +1122,11 @@ class GPUModelRunner(
             for key in list(self.latent_qwen35_pending_by_req_pos):
                 if key[0] == req_id:
                     self.latent_qwen35_pending_by_req_pos.pop(key, None)
+            for req_idx, pending_req_id in enumerate(
+                self.latent_qwen35_pending_req_ids
+            ):
+                if pending_req_id == req_id:
+                    self.latent_qwen35_pending_req_ids[req_idx] = None
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -1846,19 +1868,27 @@ class GPUModelRunner(
         entries: list[tuple[int, int, int, int, torch.Tensor]] = []
         req_indices_np = self.latent_qwen35_last_req_indices_np
         positions_np = self.latent_qwen35_last_positions_np
+        pending_req_ids = self.latent_qwen35_pending_req_ids
+        pending_token_ids = self.latent_qwen35_pending_token_ids_np
+        pending_positions = self.latent_qwen35_pending_positions_np
+        pending_hidden_gpu = self.latent_qwen35_pending_hidden.gpu
         for slot in range(total_num_scheduled_tokens):
             req_idx = int(req_indices_np[slot])
             req_id = self.input_batch.req_ids[req_idx]
+            if pending_req_ids[req_idx] != req_id:
+                continue
             pos = int(positions_np[slot])
-            pending = self.latent_qwen35_pending_by_req_pos.get((req_id, pos))
-            if pending is None:
+            if int(pending_positions[req_idx]) != pos:
                 continue
-            token_id, prev_hidden, _checkpoint = pending
-            req_state = self.requests[req_id]
-            head = self._ensure_latent_qwen35_native_head(req_state.sampling_params)
-            if head is None:
-                continue
-            entries.append((req_idx, slot, pos, token_id, prev_hidden))
+            entries.append(
+                (
+                    req_idx,
+                    slot,
+                    pos,
+                    int(pending_token_ids[req_idx]),
+                    pending_hidden_gpu[req_idx],
+                )
+            )
 
         if not entries:
             return
@@ -1939,6 +1969,7 @@ class GPUModelRunner(
         for item in entries:
             req_idx, _slot, pos, _token_id, _prev_hidden = item
             req_id = self.input_batch.req_ids[req_idx]
+            self.latent_qwen35_pending_req_ids[req_idx] = None
             self.latent_qwen35_pending_by_req_pos.pop((req_id, pos), None)
         self.latent_qwen35_use_inputs_embeds = True
         if profile_path:
@@ -4297,6 +4328,13 @@ class GPUModelRunner(
                         token_id,
                         sample_hidden_states[req_idx].detach(),
                         checkpoint,
+                    )
+                    self.latent_qwen35_pending_req_ids[req_idx] = req_id
+                    self.latent_qwen35_pending_token_ids_np[req_idx] = token_id
+                    self.latent_qwen35_pending_positions_np[req_idx] = start_idx
+                    self.latent_qwen35_pending_hidden.gpu[req_idx].copy_(
+                        sample_hidden_states[req_idx],
+                        non_blocking=True,
                     )
                 else:
                     latent_embed = self._compute_latent_qwen35_next_embed(
