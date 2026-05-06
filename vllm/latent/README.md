@@ -181,3 +181,15 @@ latent alias: qwen35-latent-step5500
 latent reasoning_tokens: 175
 latent content: </think>\n\n42
 ```
+
+OpenAI-compatible server check when the operator explicitly requested
+`--async-scheduling`:
+
+```text
+artifact: /workspace/latent-mimo/artifacts/qwen_vllm_latent_server_check_async_requested_override_retry
+requested api_server arg: --async-scheduling
+observed server log: overriding async_scheduling for correct latent next-embedding transitions
+observed engine log: Asynchronous scheduling is disabled
+latent reasoning_tokens: 139
+latent content: </think>\n\n42
+```

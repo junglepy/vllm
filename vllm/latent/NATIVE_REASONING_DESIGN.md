@@ -59,6 +59,10 @@ Already in this branch:
 - current server check after native pending cleanup exists under
   `/workspace/latent-mimo/artifacts/qwen_vllm_latent_server_check_after_native_cleanup`
   and verifies base + latent aliases through `/v1/chat/completions`.
+- current server check with operator-requested `--async-scheduling` exists under
+  `/workspace/latent-mimo/artifacts/qwen_vllm_latent_server_check_async_requested_override_retry`;
+  it verifies that the server logs the override, starts with asynchronous
+  scheduling disabled, and still returns latent `reasoning_tokens > 0`.
 
 Still not done:
 
