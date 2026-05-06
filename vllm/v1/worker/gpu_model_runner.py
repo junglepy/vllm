@@ -714,6 +714,10 @@ class GPUModelRunner(
             self.max_num_tokens, self.inputs_embeds_size, dtype=self.dtype, numpy=False
         )
         self.is_token_ids = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
+        self.latent_qwen35_embeds_by_req_pos: dict[
+            tuple[str, int], torch.Tensor
+        ] = {}
+        self.latent_qwen35_use_inputs_embeds = False
         self.discard_request_mask = self._make_buffer(
             self.max_num_reqs, dtype=torch.bool
         )
@@ -1737,6 +1741,42 @@ class GPUModelRunner(
             src=draft_token_ids.flatten()[prev_draft_token_indices_tensor],
         )
 
+    def _prepare_latent_qwen35_inputs_embeds(
+        self,
+        *,
+        req_indices: np.ndarray,
+        positions_np: np.ndarray,
+        total_num_scheduled_tokens: int,
+    ) -> None:
+        self.latent_qwen35_use_inputs_embeds = False
+        if not self.latent_qwen35_embeds_by_req_pos:
+            return
+
+        latent_slots: list[int] = []
+        latent_embeds: list[torch.Tensor] = []
+        for slot, (req_index, position) in enumerate(zip(req_indices, positions_np)):
+            req_id = self.input_batch.req_ids[int(req_index)]
+            key = (req_id, int(position))
+            embed = self.latent_qwen35_embeds_by_req_pos.pop(key, None)
+            if embed is None:
+                continue
+            latent_slots.append(slot)
+            latent_embeds.append(embed)
+
+        if not latent_slots:
+            return
+
+        token_embeds = self.model.embed_input_ids(
+            input_ids=self.input_ids.gpu[:total_num_scheduled_tokens]
+        )
+        self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(token_embeds)
+        slot_tensor = torch.tensor(latent_slots, dtype=torch.long, device=self.device)
+        self.inputs_embeds.gpu[slot_tensor] = torch.stack(latent_embeds).to(
+            device=self.device,
+            dtype=self.dtype,
+        )
+        self.latent_qwen35_use_inputs_embeds = True
+
     def _get_encoder_seq_lens(
         self,
         num_scheduled_tokens: dict[str, int],
@@ -2015,6 +2055,11 @@ class GPUModelRunner(
             num_reqs,
             total_num_scheduled_tokens,
             cu_num_tokens,
+        )
+        self._prepare_latent_qwen35_inputs_embeds(
+            req_indices=req_indices,
+            positions_np=positions_np,
+            total_num_scheduled_tokens=total_num_scheduled_tokens,
         )
 
         if self.uses_mrope:
@@ -3264,6 +3309,12 @@ class GPUModelRunner(
                 **self._init_model_kwargs(),
                 **self._extract_mm_kwargs(scheduler_output),
             }
+        elif self.latent_qwen35_use_inputs_embeds and is_first_rank:
+            if num_input_tokens > num_scheduled_tokens:
+                self.inputs_embeds.gpu[num_scheduled_tokens:num_input_tokens].zero_()
+            inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
+            input_ids = None
+            model_kwargs = self._init_model_kwargs()
         elif self.enable_prompt_embeds and is_first_rank:
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.
