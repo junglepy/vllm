@@ -22,7 +22,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
 model = "/workspace/latent-mimo/qwen35_27b_tests/models/Qwen3.5-27B"
-checkpoint = "/workspace/latent-mimo/deploy_archives/checkpoint_step1500_NEW.pt"
+checkpoint = "/workspace/latent-mimo/deploy_archives/checkpoint_step5500_NEW.pt"
 
 tok = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
 prompt = tok.apply_chat_template(
@@ -59,7 +59,7 @@ CLI:
 ```bash
 vllm latent-qwen35 \
   --model /workspace/latent-mimo/qwen35_27b_tests/models/Qwen3.5-27B \
-  --checkpoint /workspace/latent-mimo/deploy_archives/checkpoint_step1500_NEW.pt \
+  --checkpoint /workspace/latent-mimo/deploy_archives/checkpoint_step5500_NEW.pt \
   --prompt "What is 12 + 30?" \
   --max-model-len 512 \
   --max-visible-tokens 64 \
@@ -71,7 +71,7 @@ For JSONL batches:
 ```bash
 vllm latent-qwen35 \
   --model /workspace/latent-mimo/qwen35_27b_tests/models/Qwen3.5-27B \
-  --checkpoint /workspace/latent-mimo/deploy_archives/checkpoint_step1500_NEW.pt \
+  --checkpoint /workspace/latent-mimo/deploy_archives/checkpoint_step5500_NEW.pt \
   --input-jsonl input.jsonl \
   --prompt-field question \
   --output-jsonl predictions.jsonl \
@@ -94,9 +94,9 @@ Known constraints in this branch:
 - `max_internal_tokens` is enforced separately from vLLM `max_tokens`, because
   vLLM `max_tokens` counts visible output tokens only.
 
-Smoke result on B200 with `checkpoint_step1500_NEW.pt`, compiled vLLM path,
+Smoke result on B200 with `checkpoint_step5500_NEW.pt`, compiled vLLM path,
 `max_model_len=512`, `async_scheduling=False`:
 
 ```text
-visible=13, internal=162, total_steps=175, warm total_steps_per_s ~= 67.8
+visible=13, internal=162, total_steps=175, warm total_steps_per_s ~= 67.9
 ```
