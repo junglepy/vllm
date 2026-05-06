@@ -40,6 +40,7 @@ from transformers.cache_utils import DynamicCache
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5DecoderLayer,
     Qwen3_5RMSNorm,
+    Qwen3_5TextRotaryEmbedding,
 )
 from transformers.utils import logging as hf_logging
 
@@ -203,6 +204,42 @@ class Qwen35LatentMTPHead(nn.Module):
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
         return self.to_embed(self.core(input_ids, hidden_states, attention_mask))
+
+
+class Qwen35StandaloneLatentMTPHead(Qwen35LatentMTPHead):
+    """Standalone latent head for vLLM workers.
+
+    Unlike the HF convenience runtime, the vLLM worker cannot share the target
+    model's HF embedding module. This standalone head owns the embedding table
+    and loads it from latent-mimo checkpoints.
+    """
+
+    def __init__(self, text_config):
+        embed_tokens = nn.Embedding(text_config.vocab_size, text_config.hidden_size)
+        rotary_emb = Qwen3_5TextRotaryEmbedding(text_config)
+        super().__init__(text_config, rotary_emb, embed_tokens)
+
+
+def build_standalone_latent_head(
+    text_config,
+    checkpoint: str | Path,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Qwen35StandaloneLatentMTPHead:
+    head = Qwen35StandaloneLatentMTPHead(text_config).to(device=device, dtype=dtype)
+    ckpt = torch.load(Path(checkpoint), map_location="cpu")
+    state = ckpt.get("head_state_dict", ckpt)
+    missing, unexpected = head.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        raise RuntimeError(
+            "Latent checkpoint key mismatch: "
+            f"missing={missing[:20]} unexpected={unexpected[:20]}"
+        )
+    head.core.config._attn_implementation = "eager"
+    head.core.layer.self_attn.config._attn_implementation = "eager"
+    head.eval()
+    return head
 
 
 def _chat_input_ids(

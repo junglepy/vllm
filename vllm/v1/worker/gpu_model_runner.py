@@ -101,7 +101,7 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingType
+from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
@@ -717,6 +717,8 @@ class GPUModelRunner(
         self.latent_qwen35_embeds_by_req_pos: dict[
             tuple[str, int], torch.Tensor
         ] = {}
+        self.latent_qwen35_head: torch.nn.Module | None = None
+        self.latent_qwen35_mtp_caches: dict[str, object] = {}
         self.latent_qwen35_use_inputs_embeds = False
         self.discard_request_mask = self._make_buffer(
             self.max_num_reqs, dtype=torch.bool
@@ -1076,6 +1078,10 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            self.latent_qwen35_mtp_caches.pop(req_id, None)
+            for key in list(self.latent_qwen35_embeds_by_req_pos):
+                if key[0] == req_id:
+                    self.latent_qwen35_embeds_by_req_pos.pop(key, None)
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -1776,6 +1782,142 @@ class GPUModelRunner(
             dtype=self.dtype,
         )
         self.latent_qwen35_use_inputs_embeds = True
+
+    def _get_latent_qwen35_checkpoint(self, sampling_params: SamplingParams) -> str | None:
+        if not sampling_params.extra_args:
+            return None
+        latent_cfg = sampling_params.extra_args.get("latent_qwen35")
+        if isinstance(latent_cfg, dict):
+            checkpoint = latent_cfg.get("checkpoint")
+            return str(checkpoint) if checkpoint else None
+        return None
+
+    def _ensure_latent_qwen35_head(
+        self,
+        sampling_params: SamplingParams,
+    ) -> torch.nn.Module | None:
+        if self.latent_qwen35_head is not None:
+            return self.latent_qwen35_head
+
+        checkpoint = self._get_latent_qwen35_checkpoint(sampling_params)
+        if checkpoint is None:
+            return None
+
+        from vllm.latent.qwen3_5_mtp import build_standalone_latent_head
+
+        self.latent_qwen35_head = build_standalone_latent_head(
+            self.model_config.hf_text_config,
+            checkpoint,
+            device=self.device,
+            dtype=self.dtype,
+        )
+        return self.latent_qwen35_head
+
+    def _ensure_latent_qwen35_mtp_cache(self, req_id: str):
+        cache = self.latent_qwen35_mtp_caches.get(req_id)
+        if cache is not None:
+            return cache
+        from transformers.cache_utils import DynamicCache
+
+        assert self.latent_qwen35_head is not None
+        cache = DynamicCache(config=self.latent_qwen35_head.core.config)
+        self.latent_qwen35_mtp_caches[req_id] = cache
+        return cache
+
+    def _advance_latent_qwen35_mtp_cache(
+        self,
+        *,
+        req_id: str,
+        req_idx: int,
+        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        start_pos: int,
+    ) -> bool:
+        req_state = self.requests[req_id]
+        head = self._ensure_latent_qwen35_head(req_state.sampling_params)
+        if head is None:
+            return False
+
+        cache = self._ensure_latent_qwen35_mtp_cache(req_id)
+        cache_len = int(cache.get_seq_length())
+        if hidden_states.shape[0] == 0:
+            return cache_len == start_pos
+        if cache_len > start_pos:
+            return True
+        if cache_len < start_pos:
+            logger.warning_once(
+                "Cannot reconstruct Qwen3.5 latent MTP cache for request %s: "
+                "cache_len=%d start_pos=%d. Disabling latent mode.",
+                req_id,
+                cache_len,
+                start_pos,
+            )
+            req_state.latent_qwen35_active = False
+            return False
+
+        input_ids_2d = input_ids.to(device=self.device, dtype=torch.long).unsqueeze(0)
+        hidden_3d = hidden_states.to(device=self.device, dtype=self.dtype).unsqueeze(0)
+        end_pos = start_pos + int(hidden_states.shape[0])
+        attention_mask = torch.ones(
+            (1, end_pos), dtype=torch.long, device=self.device
+        )
+        cache_position = torch.arange(start_pos, end_pos, device=self.device)
+        _ = head.core(
+            input_ids=input_ids_2d,
+            hidden_states=hidden_3d,
+            attention_mask=attention_mask,
+            past_key_values=cache,
+            cache_position=cache_position,
+        )
+        return True
+
+    def _compute_latent_qwen35_next_embed(
+        self,
+        *,
+        req_id: str,
+        token_id: int,
+        target_hidden_state: torch.Tensor,
+        position: int,
+    ) -> torch.Tensor | None:
+        req_state = self.requests[req_id]
+        head = self._ensure_latent_qwen35_head(req_state.sampling_params)
+        if head is None:
+            return None
+
+        cache = self._ensure_latent_qwen35_mtp_cache(req_id)
+        cache_len = int(cache.get_seq_length())
+        if cache_len != position:
+            logger.warning_once(
+                "Qwen3.5 latent MTP cache position mismatch for request %s: "
+                "cache_len=%d position=%d. Disabling latent mode.",
+                req_id,
+                cache_len,
+                position,
+            )
+            req_state.latent_qwen35_active = False
+            return None
+
+        input_ids = torch.tensor(
+            [[int(token_id)]], dtype=torch.long, device=self.device
+        )
+        hidden = target_hidden_state.view(1, 1, -1).to(
+            device=self.device,
+            dtype=self.dtype,
+        )
+        attention_mask = torch.ones(
+            (1, position + 1), dtype=torch.long, device=self.device
+        )
+        cache_position = torch.tensor(
+            [position], dtype=torch.long, device=self.device
+        )
+        mtp_hidden = head.core(
+            input_ids=input_ids,
+            hidden_states=hidden,
+            attention_mask=attention_mask,
+            past_key_values=cache,
+            cache_position=cache_position,
+        )
+        return head.to_embed(mtp_hidden).squeeze(0).squeeze(0).detach()
 
     def _get_encoder_seq_lens(
         self,
@@ -3422,6 +3564,7 @@ class GPUModelRunner(
         sampler_output: SamplerOutput,
         logits: torch.Tensor | None,
         hidden_states: torch.Tensor,
+        sample_hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
     ) -> tuple[
         dict[str, int],
@@ -3494,6 +3637,32 @@ class GPUModelRunner(
                 if i not in invalid_req_indices_set
             }
 
+        if not self.use_async_scheduling:
+            hidden_offset = 0
+            for req_idx, req_id in enumerate(req_ids_output_copy):
+                scheduled_len = int(
+                    scheduler_output.num_scheduled_tokens.get(req_id, 0)
+                )
+                if scheduled_len <= 0:
+                    continue
+                req_state = self.requests[req_id]
+                if req_state.latent_qwen35_active:
+                    segment_start_pos = int(
+                        self.input_batch.num_computed_tokens_cpu[req_idx]
+                    )
+                    self._advance_latent_qwen35_mtp_cache(
+                        req_id=req_id,
+                        req_idx=req_idx,
+                        input_ids=self.input_ids.gpu[
+                            hidden_offset : hidden_offset + scheduled_len
+                        ],
+                        hidden_states=hidden_states[
+                            hidden_offset : hidden_offset + scheduled_len
+                        ],
+                        start_pos=segment_start_pos,
+                    )
+                hidden_offset += scheduled_len
+
         internal_sampled_token_ids = [[] for _ in req_ids_output_copy]
         if not self.use_async_scheduling and valid_sampled_token_ids:
             for req_idx, sampled_ids in enumerate(valid_sampled_token_ids):
@@ -3507,6 +3676,18 @@ class GPUModelRunner(
                 if token_id == int(req_state.latent_qwen35_think_close_token_id):
                     req_state.latent_qwen35_active = False
                     continue
+                start_idx = int(self.input_batch.num_tokens_no_spec[req_idx])
+                latent_embed = self._compute_latent_qwen35_next_embed(
+                    req_id=req_id,
+                    token_id=token_id,
+                    target_hidden_state=sample_hidden_states[req_idx],
+                    position=start_idx,
+                )
+                if latent_embed is None:
+                    continue
+                self.latent_qwen35_embeds_by_req_pos[(req_id, start_idx)] = (
+                    latent_embed
+                )
                 internal_sampled_token_ids[req_idx] = [token_id]
                 valid_sampled_token_ids[req_idx] = []
 
@@ -4394,6 +4575,7 @@ class GPUModelRunner(
                 sampler_output,
                 logits,
                 hidden_states,
+                sample_hidden_states,
                 scheduler_output.total_num_scheduled_tokens,
             )
 
