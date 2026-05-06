@@ -3637,39 +3637,20 @@ class GPUModelRunner(
                 if i not in invalid_req_indices_set
             }
 
+        hidden_offsets: list[int] | None = None
         if not self.use_async_scheduling:
+            hidden_offsets = []
             hidden_offset = 0
             for req_idx, req_id in enumerate(req_ids_output_copy):
+                hidden_offsets.append(hidden_offset)
                 scheduled_len = int(
                     scheduler_output.num_scheduled_tokens.get(req_id, 0)
                 )
-                if scheduled_len <= 0:
-                    continue
-                req_state = self.requests[req_id]
-                if req_state.latent_qwen35_active:
-                    segment_start_pos = int(
-                        self.input_batch.num_computed_tokens_cpu[req_idx]
-                    )
-                    sample_pos = int(self.input_batch.num_tokens_no_spec[req_idx])
-                    prefill_len = min(
-                        scheduled_len, max(0, sample_pos - segment_start_pos)
-                    )
-                    if prefill_len > 0:
-                        self._advance_latent_qwen35_mtp_cache(
-                            req_id=req_id,
-                            req_idx=req_idx,
-                            input_ids=self.input_ids.gpu[
-                                hidden_offset : hidden_offset + prefill_len
-                            ],
-                            hidden_states=hidden_states[
-                                hidden_offset : hidden_offset + prefill_len
-                            ],
-                            start_pos=segment_start_pos,
-                        )
                 hidden_offset += scheduled_len
 
         internal_sampled_token_ids = [[] for _ in req_ids_output_copy]
         if not self.use_async_scheduling and valid_sampled_token_ids:
+            assert hidden_offsets is not None
             for req_idx, sampled_ids in enumerate(valid_sampled_token_ids):
                 if len(sampled_ids) != 1:
                     continue
@@ -3682,6 +3663,29 @@ class GPUModelRunner(
                     req_state.latent_qwen35_active = False
                     continue
                 start_idx = int(self.input_batch.num_tokens_no_spec[req_idx])
+                segment_start_pos = int(
+                    self.input_batch.num_computed_tokens_cpu[req_idx]
+                )
+                scheduled_len = int(
+                    scheduler_output.num_scheduled_tokens.get(req_id, 0)
+                )
+                prefill_len = min(
+                    scheduled_len, max(0, start_idx - segment_start_pos)
+                )
+                if prefill_len > 0:
+                    hidden_offset = hidden_offsets[req_idx]
+                    if not self._advance_latent_qwen35_mtp_cache(
+                        req_id=req_id,
+                        req_idx=req_idx,
+                        input_ids=self.input_ids.gpu[
+                            hidden_offset : hidden_offset + prefill_len
+                        ],
+                        hidden_states=hidden_states[
+                            hidden_offset : hidden_offset + prefill_len
+                        ],
+                        start_pos=segment_start_pos,
+                    ):
+                        continue
                 latent_embed = self._compute_latent_qwen35_next_embed(
                     req_id=req_id,
                     token_id=token_id,
