@@ -144,6 +144,15 @@ def test_latent_reasoning_module_to_extra_args():
     }
 
 
+def test_latent_reasoning_module_rejects_unknown_backend():
+    with pytest.raises(ValueError, match="Unsupported latent reasoning backend"):
+        LatentReasoningModulePath(
+            name="latent-step5500",
+            path="/path/to/step5500.pt",
+            backend="unknown",
+        )
+
+
 def test_latent_qwen35_server_sets_capture_env(monkeypatch):
     monkeypatch.delenv("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS", raising=False)
     args = Namespace(

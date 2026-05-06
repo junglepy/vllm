@@ -200,6 +200,21 @@ def test_latent_reasoning_json_format(serve_parser):
     ]
 
 
+def test_latent_reasoning_invalid_backend(serve_parser):
+    module = {
+        "name": "latent-step5500",
+        "path": "/path/to/step5500.pt",
+        "backend": "unknown",
+    }
+    with pytest.raises(SystemExit):
+        serve_parser.parse_args(
+            [
+                "--latent-reasoning-modules",
+                json.dumps(module),
+            ]
+        )
+
+
 def test_latent_qwen35_invalid_json_field(serve_parser):
     with pytest.raises(SystemExit):
         serve_parser.parse_args(

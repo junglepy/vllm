@@ -4,7 +4,7 @@
 
 from dataclasses import dataclass
 
-from vllm.latent.config import QWEN35_MTP_BACKEND
+from vllm.latent.config import QWEN35_MTP_BACKEND, SUPPORTED_LATENT_REASONING_BACKENDS
 
 
 @dataclass
@@ -28,6 +28,14 @@ class LatentReasoningModulePath:
     backend: str = QWEN35_MTP_BACKEND
     think_close_token_id: int = 248069
     max_internal_tokens: int = 1200
+
+    def __post_init__(self) -> None:
+        if self.backend not in SUPPORTED_LATENT_REASONING_BACKENDS:
+            raise ValueError(
+                "Unsupported latent reasoning backend "
+                f"{self.backend!r}; supported backends: "
+                f"{sorted(SUPPORTED_LATENT_REASONING_BACKENDS)}."
+            )
 
     def to_extra_args(self) -> dict[str, int | str]:
         return {
