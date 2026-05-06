@@ -3,6 +3,7 @@
 
 import functools
 import gc
+import importlib
 import itertools
 import json
 import os
@@ -54,6 +55,7 @@ from vllm.forward_context import (
 )
 from vllm.logger import init_logger
 from vllm.latent.config import (
+    QWEN35_MTP_BACKEND,
     get_latent_reasoning_backend_spec,
     normalize_latent_reasoning_config,
 )
@@ -2240,25 +2242,30 @@ class GPUModelRunner(
 
     def _maybe_init_latent_qwen35_native_head(self) -> None:
         hf_config = self.model_config.hf_text_config
-        if getattr(hf_config, "model_type", None) not in ("qwen3_5", "qwen3_5_text"):
+        spec = get_latent_reasoning_backend_spec(QWEN35_MTP_BACKEND)
+        if getattr(hf_config, "model_type", None) not in spec.supported_model_types:
             return
         if self.latent_qwen35_native_head is not None:
             return
+        if spec.adapter_qualname is None or spec.adapter_prefix is None:
+            logger.warning_once(
+                "Latent reasoning backend %s has no native adapter registered.",
+                spec.name,
+            )
+            return
+        module = importlib.import_module(spec.adapter_module or "")
+        adapter_cls = getattr(module, spec.adapter_class or "")
 
-        from vllm.model_executor.models.qwen3_5_latent_mtp import (
-            Qwen3_5LatentMTP,
-        )
-
-        head = Qwen3_5LatentMTP(
+        head = adapter_cls(
             vllm_config=self.vllm_config,
-            prefix="latent_qwen35",
+            prefix=spec.adapter_prefix,
         ).to(device=self.device, dtype=self.dtype)
         head.eval()
         self.latent_qwen35_native_head = head
         self.latent_qwen35_native_layer_names = tuple(
             name
             for name, module in self.compilation_config.static_forward_context.items()
-            if name.startswith("latent_qwen35.")
+            if name.startswith(f"{spec.adapter_prefix}.")
             and isinstance(module, AttentionLayerBase)
         )
         if not self.latent_qwen35_native_layer_names:

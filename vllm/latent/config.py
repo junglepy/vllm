@@ -28,6 +28,8 @@ class LatentReasoningBackendSpec:
     capture_inputs_embeds_env: str | None = None
     adapter_module: str | None = None
     adapter_class: str | None = None
+    adapter_prefix: str | None = None
+    supported_model_types: tuple[str, ...] = ()
     supports_async_scheduling: bool = False
 
     @property
@@ -45,6 +47,8 @@ LATENT_REASONING_BACKENDS: dict[str, LatentReasoningBackendSpec] = {
         capture_inputs_embeds_env="LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS",
         adapter_module="vllm.model_executor.models.qwen3_5_latent_mtp",
         adapter_class="Qwen3_5LatentMTP",
+        adapter_prefix="latent_qwen35",
+        supported_model_types=("qwen3_5", "qwen3_5_text"),
     )
 }
 SUPPORTED_LATENT_REASONING_BACKENDS = frozenset(LATENT_REASONING_BACKENDS)

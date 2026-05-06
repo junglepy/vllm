@@ -22,6 +22,8 @@ def test_backend_registry_exposes_qwen35_defaults():
         spec.adapter_qualname
         == "vllm.model_executor.models.qwen3_5_latent_mtp.Qwen3_5LatentMTP"
     )
+    assert spec.adapter_prefix == "latent_qwen35"
+    assert spec.supported_model_types == ("qwen3_5", "qwen3_5_text")
     assert latent_reasoning_capture_env_names({"qwen35_mtp"}) == {
         "LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS"
     }
