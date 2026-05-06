@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionStreamResponse,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokenUsageInfo,
     ErrorResponse,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
@@ -539,16 +540,21 @@ class OpenAIServingCompletion(OpenAIServing):
 
             num_prompt_tokens += len(prompt_token_ids)
 
+        latent_reasoning_tokens = sum(
+            int(getattr(res, "latent_internal_token_count", 0))
+            for res in final_res_batch
+        )
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
-            completion_tokens=num_generated_tokens,
-            total_tokens=num_prompt_tokens + num_generated_tokens,
-            latent_internal_tokens=sum(
-                int(getattr(res, "latent_internal_token_count", 0))
-                for res in final_res_batch
-            )
-            or None,
+            completion_tokens=num_generated_tokens + latent_reasoning_tokens,
+            total_tokens=num_prompt_tokens
+            + num_generated_tokens
+            + latent_reasoning_tokens,
         )
+        if latent_reasoning_tokens:
+            usage.completion_tokens_details = CompletionTokenUsageInfo(
+                reasoning_tokens=latent_reasoning_tokens
+            )
 
         if (
             self.enable_prompt_tokens_details

@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokenUsageInfo,
     ErrorResponse,
     RequestResponseMetadata,
     UsageInfo,
@@ -305,16 +306,21 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 )
                 choices.append(choice_data)
 
+        latent_reasoning_tokens = sum(
+            int(getattr(res, "latent_internal_token_count", 0))
+            for res in final_results.values()
+        )
         usage = UsageInfo(
             prompt_tokens=total_prompt_tokens,
-            completion_tokens=total_completion_tokens,
-            total_tokens=total_prompt_tokens + total_completion_tokens,
-            latent_internal_tokens=sum(
-                int(getattr(res, "latent_internal_token_count", 0))
-                for res in final_results.values()
-            )
-            or None,
+            completion_tokens=total_completion_tokens + latent_reasoning_tokens,
+            total_tokens=total_prompt_tokens
+            + total_completion_tokens
+            + latent_reasoning_tokens,
         )
+        if latent_reasoning_tokens:
+            usage.completion_tokens_details = CompletionTokenUsageInfo(
+                reasoning_tokens=latent_reasoning_tokens
+            )
         request_metadata.final_usage_info = usage
 
         choices.sort(key=lambda c: c.index)

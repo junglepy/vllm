@@ -121,8 +121,14 @@ vllm latent-qwen35 \
   --limit 50
 ```
 
-The output includes `latent_internal_token_count`. For latent mode, the relevant
-throughput metric is usually:
+The offline output includes `latent_internal_token_count`. OpenAI-compatible
+HTTP responses expose the same latent steps through the native reasoning-token
+usage fields:
+
+- Chat/Completions: `usage.completion_tokens_details.reasoning_tokens`
+- Responses: `usage.output_tokens_details.reasoning_tokens`
+
+For latent mode, the relevant throughput metric is usually:
 
 ```text
 (visible output tokens + latent_internal_token_count) / elapsed_seconds

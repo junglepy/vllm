@@ -40,6 +40,7 @@ from vllm.entrypoints.openai.chat_completion.stream_harmony import (
     extract_harmony_streaming_delta,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokenUsageInfo,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -1625,17 +1626,20 @@ class OpenAIServingChat(OpenAIServing):
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs
         )
+        latent_reasoning_tokens = int(
+            getattr(final_res, "latent_internal_token_count", 0)
+        )
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
-            completion_tokens=num_generated_tokens,
-            total_tokens=num_prompt_tokens + num_generated_tokens,
-            latent_internal_tokens=getattr(
-                final_res,
-                "latent_internal_token_count",
-                0,
-            )
-            or None,
+            completion_tokens=num_generated_tokens + latent_reasoning_tokens,
+            total_tokens=num_prompt_tokens
+            + num_generated_tokens
+            + latent_reasoning_tokens,
         )
+        if latent_reasoning_tokens:
+            usage.completion_tokens_details = CompletionTokenUsageInfo(
+                reasoning_tokens=latent_reasoning_tokens
+            )
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens
