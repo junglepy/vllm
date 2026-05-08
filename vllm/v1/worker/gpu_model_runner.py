@@ -1848,15 +1848,6 @@ class GPUModelRunner(
         self.latent_qwen35_last_native_latent_positions.clear()
         if self.latent_qwen35_native_head is None:
             return
-        capture_inputs_embeds = (
-            os.getenv("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS") == "1"
-        )
-        if capture_inputs_embeds:
-            token_embeds = self.model.embed_input_ids(
-                input_ids=self.input_ids.gpu[:total_num_scheduled_tokens]
-            )
-            self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(token_embeds)
-            self.latent_qwen35_use_inputs_embeds = True
         if (
             self.latent_qwen35_num_pending <= 0
             or self.latent_qwen35_last_req_indices_np is None
@@ -2059,11 +2050,10 @@ class GPUModelRunner(
         if all_slots_latent:
             self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(embeds)
         else:
-            if not capture_inputs_embeds:
-                token_embeds = self.model.embed_input_ids(
-                    input_ids=self.input_ids.gpu[:total_num_scheduled_tokens]
-                )
-                self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(token_embeds)
+            token_embeds = self.model.embed_input_ids(
+                input_ids=self.input_ids.gpu[:total_num_scheduled_tokens]
+            )
+            self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(token_embeds)
             self.inputs_embeds.gpu[scheduled_slots] = embeds
         self.latent_qwen35_last_native_latent_positions.update(
             (item[0], item[2]) for item in entries
@@ -4422,6 +4412,12 @@ class GPUModelRunner(
                     >= req_state.latent_qwen35_max_internal_tokens
                 ):
                     req_state.latent_qwen35_active = False
+                    # Emit an explicit visible </think> on forced latent cutoff;
+                    # otherwise the next normal decode step continues from an
+                    # arbitrary latent token and produces long reasoning tails.
+                    valid_sampled_token_ids[req_idx] = [
+                        int(req_state.latent_qwen35_think_close_token_id)
+                    ]
                     continue
                 start_idx = int(self.input_batch.num_tokens_no_spec[req_idx])
                 segment_start_pos = int(
@@ -5131,13 +5127,6 @@ class GPUModelRunner(
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
-        if self.latent_qwen35_use_inputs_embeds:
-            # Latent decode steps swap sampled token IDs for continuous
-            # embeddings. CUDA graphs are captured on the normal token-ID path,
-            # so force eager execution to ensure the current inputs_embeds buffer
-            # is consumed by the backbone.
-            cudagraph_mode = CUDAGraphMode.NONE
-
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
