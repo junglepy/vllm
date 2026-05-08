@@ -4412,12 +4412,6 @@ class GPUModelRunner(
                     >= req_state.latent_qwen35_max_internal_tokens
                 ):
                     req_state.latent_qwen35_active = False
-                    # Emit an explicit visible </think> on forced latent cutoff;
-                    # otherwise the next normal decode step continues from an
-                    # arbitrary latent token and produces long reasoning tails.
-                    valid_sampled_token_ids[req_idx] = [
-                        int(req_state.latent_qwen35_think_close_token_id)
-                    ]
                     continue
                 start_idx = int(self.input_batch.num_tokens_no_spec[req_idx])
                 segment_start_pos = int(
