@@ -34,11 +34,12 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from transformers.masking_utils import create_causal_mask
 from transformers.cache_utils import DynamicCache
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5DecoderLayer,
+    Qwen3_5ForConditionalGeneration,
     Qwen3_5RMSNorm,
     Qwen3_5TextRotaryEmbedding,
 )
@@ -124,7 +125,7 @@ class Qwen35MTPCore(nn.Module):
         cfg.num_hidden_layers = 1
         cfg.full_attention_interval = 1
         cfg.layer_types = ["full_attention"]
-        cfg._attn_implementation = "sdpa"
+        cfg._attn_implementation = "eager"
         self.config = cfg
 
         self.embed_tokens = embed_tokens
@@ -292,14 +293,25 @@ class Qwen35LatentMTPRuntime:
         if config.attn_implementation:
             model_kwargs["attn_implementation"] = config.attn_implementation
         try:
-            self.model = AutoModelForCausalLM.from_pretrained(
+            cfg = AutoConfig.from_pretrained(
                 self.model_path,
+                trust_remote_code=config.trust_remote_code,
+            )
+            model_cls = (
+                Qwen3_5ForConditionalGeneration
+                if hasattr(cfg, "text_config")
+                else AutoModelForCausalLM
+            )
+            self.model = model_cls.from_pretrained(
+                self.model_path,
+                config=cfg,
                 dtype=dtype,
                 **model_kwargs,
             )
         except TypeError:
-            self.model = AutoModelForCausalLM.from_pretrained(
+            self.model = model_cls.from_pretrained(
                 self.model_path,
+                config=cfg,
                 torch_dtype=dtype,
                 **model_kwargs,
             )
@@ -331,7 +343,6 @@ class Qwen35LatentMTPRuntime:
 
     @torch.inference_mode()
     def generate(self, prompt: str, *, system: str | None = None) -> LatentGenerationOutput:
-        start = time.perf_counter()
         cfg = self.config
         system_prompt = cfg.system_prompt if system is None else system
         input_ids = _chat_input_ids(
@@ -341,6 +352,26 @@ class Qwen35LatentMTPRuntime:
             cfg.enable_thinking,
             self.device,
         )
+        return self.generate_from_input_ids(prompt=prompt, input_ids=input_ids)
+
+    @torch.inference_mode()
+    def generate_rendered_prompt(self, prompt: str) -> LatentGenerationOutput:
+        input_ids = self.tokenizer(
+            prompt,
+            add_special_tokens=False,
+            return_tensors="pt",
+        )["input_ids"].to(self.device)
+        return self.generate_from_input_ids(prompt=prompt, input_ids=input_ids)
+
+    @torch.inference_mode()
+    def generate_from_input_ids(
+        self,
+        *,
+        prompt: str,
+        input_ids: torch.Tensor,
+    ) -> LatentGenerationOutput:
+        start = time.perf_counter()
+        cfg = self.config
         attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=self.device)
 
         prefill = self.text_backbone(

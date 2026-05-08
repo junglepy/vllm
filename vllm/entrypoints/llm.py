@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import os
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -65,6 +66,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import (
     ClassificationRequestOutput,
+    CompletionOutput,
     EmbeddingRequestOutput,
     PoolingRequestOutput,
     RequestOutput,
@@ -255,6 +257,20 @@ class LLM:
         **kwargs: Any,
     ) -> None:
         """LLM constructor."""
+
+        self._latent_qwen35_model_path = model
+        self._latent_qwen35_hf_runtime: Any | None = None
+        self._latent_qwen35_hf_runtime_key: tuple[str, str, int, int] | None = None
+        if (
+            os.getenv("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS") == "1"
+            and os.getenv("LATENT_QWEN35_ENABLE_NATIVE") != "1"
+        ):
+            self.llm_engine = None
+            self.model_config = None
+            self.engine_class = None
+            self.request_counter = Counter()
+            self.default_sampling_params = None
+            return
 
         if "swap_space" in kwargs:
             kwargs.pop("swap_space")
@@ -486,6 +502,23 @@ class LLM:
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
         """
+        if sampling_params is None:
+            sampling_params = self.get_default_sampling_params()
+
+        latent_outputs = self._try_generate_qwen35_latent_hf_fallback(
+            prompts,
+            sampling_params,
+        )
+        if latent_outputs is not None:
+            return latent_outputs
+
+        if self.model_config is None:
+            raise ValueError(
+                "This LLM instance was initialized for Qwen3.5 latent HF "
+                "fallback only; non-latent generation requires "
+                "LATENT_QWEN35_ENABLE_NATIVE=1 or no latent capture env."
+            )
+
         runner_type = self.model_config.runner_type
         if runner_type != "generate":
             raise ValueError(
@@ -493,9 +526,6 @@ class LLM:
                 "Try passing `--runner generate` to use the model as a "
                 "generative model."
             )
-
-        if sampling_params is None:
-            sampling_params = self.get_default_sampling_params()
 
         return self._run_completion(
             prompts=prompts,
@@ -507,6 +537,111 @@ class LLM:
             priority=priority,
             mm_processor_kwargs=mm_processor_kwargs,
         )
+
+    def _try_generate_qwen35_latent_hf_fallback(
+        self,
+        prompts: PromptType | Sequence[PromptType],
+        sampling_params: SamplingParams | Sequence[SamplingParams],
+    ) -> list[RequestOutput] | None:
+        if os.getenv("LATENT_QWEN35_ENABLE_NATIVE") == "1":
+            return None
+        if isinstance(sampling_params, Sequence):
+            if not sampling_params:
+                return None
+            first_params = sampling_params[0]
+            if any(params != first_params for params in sampling_params):
+                return None
+            params = first_params
+        else:
+            params = sampling_params
+
+        latent_cfg = getattr(params, "extra_args", None)
+        if not isinstance(latent_cfg, dict):
+            return None
+        latent_cfg = latent_cfg.get("latent_qwen35") or latent_cfg.get(
+            "latent_reasoning"
+        )
+        if not isinstance(latent_cfg, dict):
+            return None
+        backend = latent_cfg.get("backend")
+        if backend not in (None, "qwen35_mtp"):
+            return None
+        checkpoint = latent_cfg.get("checkpoint")
+        if not checkpoint:
+            return None
+
+        prompt_list: list[str]
+        if isinstance(prompts, str):
+            prompt_list = [prompts]
+        elif isinstance(prompts, Sequence) and all(
+            isinstance(prompt, str) for prompt in prompts
+        ):
+            prompt_list = list(prompts)
+        else:
+            return None
+
+        from vllm.latent.qwen3_5_mtp import (
+            LatentGenerationConfig,
+            Qwen35LatentMTPRuntime,
+        )
+
+        max_total_steps = int(
+            latent_cfg.get(
+                "max_internal_tokens",
+                getattr(params, "max_tokens", 1200),
+            )
+        )
+        think_close_token_id = int(latent_cfg.get("think_close_token_id", 248069))
+        model_path = str(self._latent_qwen35_model_path)
+        key = (
+            model_path,
+            str(checkpoint),
+            max_total_steps,
+            think_close_token_id,
+        )
+        if self._latent_qwen35_hf_runtime_key != key:
+            self._latent_qwen35_hf_runtime = Qwen35LatentMTPRuntime(
+                LatentGenerationConfig(
+                    model=model_path,
+                    checkpoint=str(checkpoint),
+                    dtype="bfloat16",
+                    device_map="cuda",
+                    trust_remote_code=True,
+                    think_close_token_id=think_close_token_id,
+                    max_total_steps=max_total_steps,
+                    enable_thinking=True,
+                )
+            )
+            self._latent_qwen35_hf_runtime_key = key
+
+        assert self._latent_qwen35_hf_runtime is not None
+        outputs: list[RequestOutput] = []
+        for prompt in prompt_list:
+            latent = self._latent_qwen35_hf_runtime.generate_rendered_prompt(prompt)
+            outputs.append(
+                RequestOutput(
+                    request_id=str(next(self.request_counter)),
+                    prompt=prompt,
+                    prompt_token_ids=None,
+                    prompt_logprobs=None,
+                    outputs=[
+                        CompletionOutput(
+                            index=0,
+                            text=latent.generated_text,
+                            token_ids=latent.generated_token_ids,
+                            cumulative_logprob=None,
+                            logprobs=None,
+                            finish_reason=(
+                                "stop" if latent.mode_exit == "eos" else "length"
+                            ),
+                            stop_reason=None,
+                        )
+                    ],
+                    finished=True,
+                    latent_internal_token_count=int(latent.latent_steps),
+                )
+            )
+        return outputs
 
     def enqueue(
         self,

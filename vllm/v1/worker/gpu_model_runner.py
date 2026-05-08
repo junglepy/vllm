@@ -757,6 +757,7 @@ class GPUModelRunner(
             int, tuple[torch.Tensor, torch.Tensor]
         ] = {}
         self.latent_qwen35_false_prefill_cache: dict[int, torch.Tensor] = {}
+        self.latent_qwen35_last_native_latent_positions: set[tuple[int, int]] = set()
         self.latent_qwen35_last_req_indices_np: np.ndarray | None = None
         self.latent_qwen35_last_positions_np: np.ndarray | None = None
         self.latent_qwen35_mtp_caches: dict[str, object] = {}
@@ -1843,9 +1844,21 @@ class GPUModelRunner(
         profile_path = os.getenv("LATENT_QWEN35_PHASE_PROFILE_JSONL")
         profile_start = time.perf_counter() if profile_path else 0.0
         profile_entries = 0
+        self.latent_qwen35_use_inputs_embeds = False
+        self.latent_qwen35_last_native_latent_positions.clear()
+        if self.latent_qwen35_native_head is None:
+            return
+        capture_inputs_embeds = (
+            os.getenv("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS") == "1"
+        )
+        if capture_inputs_embeds:
+            token_embeds = self.model.embed_input_ids(
+                input_ids=self.input_ids.gpu[:total_num_scheduled_tokens]
+            )
+            self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(token_embeds)
+            self.latent_qwen35_use_inputs_embeds = True
         if (
-            self.latent_qwen35_native_head is None
-            or self.latent_qwen35_num_pending <= 0
+            self.latent_qwen35_num_pending <= 0
             or self.latent_qwen35_last_req_indices_np is None
             or self.latent_qwen35_last_positions_np is None
             or not isinstance(slot_mappings, dict)
@@ -1917,6 +1930,10 @@ class GPUModelRunner(
 
             self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(
                 embeds.to(device=self.device, dtype=self.dtype)
+            )
+            self.latent_qwen35_last_native_latent_positions.update(
+                (req_idx, int(positions_np[req_idx]))
+                for req_idx in range(total_num_scheduled_tokens)
             )
             for req_idx in range(total_num_scheduled_tokens):
                 self.latent_qwen35_pending_req_ids[req_idx] = None
@@ -2042,11 +2059,15 @@ class GPUModelRunner(
         if all_slots_latent:
             self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(embeds)
         else:
-            token_embeds = self.model.embed_input_ids(
-                input_ids=self.input_ids.gpu[:total_num_scheduled_tokens]
-            )
-            self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(token_embeds)
+            if not capture_inputs_embeds:
+                token_embeds = self.model.embed_input_ids(
+                    input_ids=self.input_ids.gpu[:total_num_scheduled_tokens]
+                )
+                self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(token_embeds)
             self.inputs_embeds.gpu[scheduled_slots] = embeds
+        self.latent_qwen35_last_native_latent_positions.update(
+            (item[0], item[2]) for item in entries
+        )
         for item in entries:
             req_idx, _slot, _pos, _token_id, _prev_hidden = item
             self.latent_qwen35_pending_req_ids[req_idx] = None
@@ -2111,6 +2132,8 @@ class GPUModelRunner(
             if self._ensure_latent_qwen35_native_head(req_state.sampling_params) is None:
                 continue
             pos = int(positions_np[slot])
+            if (req_idx, pos) in self.latent_qwen35_last_native_latent_positions:
+                continue
             if (
                 req_state.latent_qwen35_internal_positions is not None
                 and pos in req_state.latent_qwen35_internal_positions
@@ -2241,6 +2264,8 @@ class GPUModelRunner(
         return str(latent_cfg["checkpoint"])
 
     def _maybe_init_latent_qwen35_native_head(self) -> None:
+        if os.getenv("LATENT_QWEN35_ENABLE_NATIVE") != "1":
+            return
         hf_config = self.model_config.hf_text_config
         spec = get_latent_reasoning_backend_spec(QWEN35_MTP_BACKEND)
         if getattr(hf_config, "model_type", None) not in spec.supported_model_types:
@@ -2380,10 +2405,15 @@ class GPUModelRunner(
         hidden_3d = hidden_states.to(device=self.device, dtype=self.dtype).unsqueeze(0)
         end_pos = start_pos + int(hidden_states.shape[0])
         cache_position = torch.arange(start_pos, end_pos, device=self.device)
+        attention_mask = torch.ones(
+            (1, end_pos),
+            dtype=torch.long,
+            device=self.device,
+        )
         _ = head.core(
             input_ids=input_ids_2d,
             hidden_states=hidden_3d,
-            attention_mask=None,
+            attention_mask=attention_mask,
             past_key_values=cache,
             cache_position=cache_position,
         )
@@ -2425,10 +2455,15 @@ class GPUModelRunner(
         cache_position = torch.tensor(
             [position], dtype=torch.long, device=self.device
         )
+        attention_mask = torch.ones(
+            (1, position + 1),
+            dtype=torch.long,
+            device=self.device,
+        )
         mtp_hidden = head.core(
             input_ids=input_ids,
             hidden_states=hidden,
-            attention_mask=None,
+            attention_mask=attention_mask,
             past_key_values=cache,
             cache_position=cache_position,
         )
@@ -5096,6 +5131,12 @@ class GPUModelRunner(
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
+        if self.latent_qwen35_use_inputs_embeds:
+            # Latent decode steps swap sampled token IDs for continuous
+            # embeddings. CUDA graphs are captured on the normal token-ID path,
+            # so force eager execution to ensure the current inputs_embeds buffer
+            # is consumed by the backbone.
+            cudagraph_mode = CUDAGraphMode.NONE
 
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
@@ -6570,10 +6611,7 @@ class GPUModelRunner(
                     **model_kwargs,
                     **self._dummy_mm_kwargs(num_reqs),
                 }
-            elif self.enable_prompt_embeds or (
-                self.latent_qwen35_native_head is not None
-                and os.getenv("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS") == "1"
-            ):
+            elif self.enable_prompt_embeds or self.latent_qwen35_use_inputs_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
                 model_kwargs = self._init_model_kwargs()
