@@ -2309,8 +2309,9 @@ class GPUModelRunner(
                 f"{self.latent_qwen35_native_checkpoint}, requested={checkpoint}."
             )
 
-        ckpt = torch.load(checkpoint, map_location="cpu")
-        state = ckpt.get("head_state_dict", ckpt)
+        from vllm.latent.checkpoint_io import load_latent_head_state_dict
+
+        state, _ = load_latent_head_state_dict(checkpoint)
         head.load_weights(state.items())  # type: ignore[attr-defined]
         head.to(device=self.device, dtype=self.dtype)
         head.eval()

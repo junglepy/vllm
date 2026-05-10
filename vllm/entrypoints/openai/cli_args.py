@@ -158,14 +158,14 @@ class BaseFrontendArgs:
     \"base_model_name\": \"id\"}`"""
     latent_qwen35_modules: list[LatentQwen35ModulePath] | None = None
     """Deprecated alias for --latent-reasoning-modules with backend=qwen35_mtp.
-    Qwen3.5 latent-head aliases in either 'name=checkpoint.pt' format or
+    Qwen3.5 latent-head aliases in either 'name=checkpoint' format or
     JSON format. Example:
-    `{\"name\":\"qwen35-latent-step5500\",\"path\":\"/ckpts/step5500.pt\",
+    `{\"name\":\"qwen35-latent-step5500\",\"path\":\"owner/repo:latent_head.safetensors\",
     \"max_internal_tokens\":1200}`."""
     latent_reasoning_modules: list[LatentReasoningModulePath] | None = None
-    """Latent reasoning aliases in either 'name=checkpoint.pt' format or JSON
+    """Latent reasoning aliases in either 'name=checkpoint' format or JSON
     format. Example:
-    `{\"name\":\"qwen35-latent-step5500\",\"path\":\"/ckpts/step5500.pt\",
+    `{\"name\":\"qwen35-latent-step5500\",\"path\":\"owner/repo:latent_head.safetensors\",
     \"backend\":\"qwen35_mtp\",\"max_internal_tokens\":1200}`."""
     chat_template: str | None = None
     """The file path to the chat template, or the template in single-line form

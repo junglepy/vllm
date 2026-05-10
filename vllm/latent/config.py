@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
+
+from vllm.latent.checkpoint_io import normalize_latent_checkpoint_ref
 
 
 LATENT_REASONING_EXTRA_ARGS_KEY = "latent_reasoning"
@@ -115,7 +116,7 @@ def normalize_latent_reasoning_config(
 
     normalized = dict(latent_cfg)
     normalized["backend"] = str(backend)
-    normalized["checkpoint"] = str(Path(str(checkpoint)).expanduser().resolve())
+    normalized["checkpoint"] = normalize_latent_checkpoint_ref(str(checkpoint))
     normalized["think_close_token_id"] = int(
         normalized.get(
             "think_close_token_id",

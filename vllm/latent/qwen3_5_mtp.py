@@ -45,6 +45,8 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import (
 )
 from transformers.utils import logging as hf_logging
 
+from vllm.latent.checkpoint_io import load_latent_head_state_dict
+
 
 @dataclass(slots=True)
 class LatentGenerationConfig:
@@ -230,8 +232,7 @@ def build_standalone_latent_head(
     dtype: torch.dtype,
 ) -> Qwen35StandaloneLatentMTPHead:
     head = Qwen35StandaloneLatentMTPHead(text_config).to(device=device, dtype=dtype)
-    ckpt = torch.load(Path(checkpoint), map_location="cpu")
-    state = ckpt.get("head_state_dict", ckpt)
+    state, _ = load_latent_head_state_dict(checkpoint)
     missing, unexpected = head.load_state_dict(state, strict=False)
     if missing or unexpected:
         raise RuntimeError(
@@ -277,7 +278,7 @@ class Qwen35LatentMTPRuntime:
         hf_logging.set_verbosity_error()
         self.config = config
         self.model_path = Path(config.model)
-        self.checkpoint_path = Path(config.checkpoint)
+        self.checkpoint = str(config.checkpoint)
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_path,
             trust_remote_code=config.trust_remote_code,
@@ -331,8 +332,7 @@ class Qwen35LatentMTPRuntime:
         return head.to(device=self.device, dtype=next(self.model.parameters()).dtype)
 
     def _load_latent_checkpoint(self) -> None:
-        ckpt = torch.load(self.checkpoint_path, map_location="cpu")
-        state = ckpt.get("head_state_dict", ckpt)
+        state, _ = load_latent_head_state_dict(self.checkpoint)
         missing, unexpected = self.latent_head.load_state_dict(state, strict=False)
         missing = [x for x in missing if not x.startswith("core.embed_tokens.")]
         if missing or unexpected:

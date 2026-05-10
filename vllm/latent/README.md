@@ -63,6 +63,25 @@ print(out.outputs[0].text)
 print(out.latent_internal_token_count)
 ```
 
+Latent-head checkpoint references support local PyTorch checkpoints, local
+`safetensors`, and Hugging Face Hub references:
+
+```python
+checkpoint = "/path/to/checkpoint.pt"
+checkpoint = "/path/to/latent_head.safetensors"
+checkpoint = "junglepy/qwen35-latent-v2"  # tries latent_head.safetensors first
+checkpoint = "junglepy/qwen35-latent-v2:latent_head.safetensors"
+checkpoint = "hf://junglepy/qwen35-latent-v2/latent_head.safetensors"
+```
+
+Recommended HF repo layout:
+
+```text
+latent_head.safetensors
+latent_config.json
+README.md
+```
+
 Multiple latent heads can be loaded in one `LLM` instance. The worker keeps a
 head cache keyed by resolved checkpoint path, while each request keeps its own
 MTP KV cache:

@@ -21,6 +21,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from vllm.latent.checkpoint_io import normalize_latent_checkpoint_ref
+
 
 DEFAULT_PROMPTS = [
     "What is 12 + 30? Answer briefly.",
@@ -192,7 +194,7 @@ def main() -> int:
 
     module = {
         "name": args.latent_alias,
-        "path": str(Path(args.checkpoint).expanduser().resolve()),
+        "path": normalize_latent_checkpoint_ref(args.checkpoint),
         "backend": "qwen35_mtp",
         "max_internal_tokens": args.max_internal_tokens,
     }

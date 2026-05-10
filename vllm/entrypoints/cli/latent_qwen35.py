@@ -170,7 +170,11 @@ class LatentReasoningSubcommand(CLISubcommand):
             usage=self.usage,
         )
         parser.add_argument("--model", required=True, help="Path or HF id for the base model")
-        parser.add_argument("--checkpoint", required=True, help="Latent head checkpoint .pt")
+        parser.add_argument(
+            "--checkpoint",
+            required=True,
+            help="Latent head checkpoint: local .pt/.safetensors or HF ref owner/repo[:filename]",
+        )
         parser.add_argument(
             "--backend",
             choices=sorted(SUPPORTED_LATENT_REASONING_BACKENDS),
