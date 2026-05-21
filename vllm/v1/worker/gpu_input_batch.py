@@ -49,9 +49,21 @@ class CachedRequestState:
     # Used when both async_scheduling and spec_decode are enabled.
     prev_num_draft_len: int = 0
     latent_qwen35_active: bool = False
+    latent_qwen35_checkpoint: str | None = None
     latent_qwen35_think_close_token_id: int = 248069
     latent_qwen35_max_internal_tokens: int = 1200
     latent_qwen35_internal_positions: set[int] | None = None
+    latent_qwen35_repeat_close_threshold: int = 512
+    latent_qwen35_last_internal_token_id: int = -1
+    latent_qwen35_repeat_count: int = 0
+    soft_thinking_active: bool = False
+    soft_thinking_think_close_token_id: int = 248069
+    soft_thinking_max_internal_tokens: int = 256
+    soft_thinking_entropy_threshold: float = 0.0
+    soft_thinking_temperature: float = 1.0
+    soft_thinking_top_k: int = 64
+    soft_thinking_top_p: float = 1.0
+    soft_thinking_internal_positions: set[int] | None = None
 
     # for pooling models
     pooling_params: PoolingParams | None = None

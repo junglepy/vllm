@@ -730,10 +730,6 @@ class GPUModelRunner(
         self.latent_qwen35_pending_req_ids: list[str | None] = [
             None
         ] * self.max_num_reqs
-        self.latent_qwen35_pending_token_ids_np = np.zeros(
-            self.max_num_reqs,
-            dtype=np.int32,
-        )
         self.latent_qwen35_pending_positions_np = np.zeros(
             self.max_num_reqs,
             dtype=np.int64,
@@ -756,12 +752,84 @@ class GPUModelRunner(
         self.latent_qwen35_query_start_cache: dict[
             int, tuple[torch.Tensor, torch.Tensor]
         ] = {}
+        self.latent_qwen35_decode_list_cache: dict[
+            int, tuple[list[int], list[int]]
+        ] = {}
         self.latent_qwen35_false_prefill_cache: dict[int, torch.Tensor] = {}
         self.latent_qwen35_last_native_latent_positions: set[tuple[int, int]] = set()
         self.latent_qwen35_last_req_indices_np: np.ndarray | None = None
         self.latent_qwen35_last_positions_np: np.ndarray | None = None
         self.latent_qwen35_mtp_caches: dict[str, object] = {}
         self.latent_qwen35_use_inputs_embeds = False
+        self.latent_qwen35_capture_inputs_embeds = (
+            os.getenv("LATENT_QWEN35_CAPTURE_INPUTS_EMBEDS") == "1"
+            and os.getenv("LATENT_QWEN35_ENABLE_NATIVE") == "1"
+        )
+        self.latent_qwen35_phase_profile_path = os.getenv(
+            "LATENT_QWEN35_PHASE_PROFILE_JSONL"
+        )
+        self.latent_qwen35_profile_path = os.getenv("LATENT_QWEN35_PROFILE_JSONL")
+        self.latent_qwen35_detail_profile_path = os.getenv(
+            "LATENT_QWEN35_DETAIL_PROFILE_JSONL"
+        )
+        self.latent_qwen35_cudagraph_head_enabled = (
+            os.getenv("LATENT_QWEN35_CUDAGRAPH_HEAD", "1") != "0"
+            and os.getenv("LATENT_QWEN35_ENABLE_NATIVE") == "1"
+        )
+        self.latent_qwen35_head_cudagraphs: dict[
+            int | tuple[str, int], torch.cuda.CUDAGraph
+        ] = {}
+        self.latent_qwen35_head_cudagraph_metadata: dict[
+            int | tuple[str, int], tuple[dict[str, Any], dict[str, torch.Tensor]]
+        ] = {}
+        self.latent_qwen35_head_cudagraph_pool: object | None = None
+        self.latent_qwen35_compact_cudagraph_head_enabled = (
+            self.latent_qwen35_cudagraph_head_enabled
+            and os.getenv("LATENT_QWEN35_COMPACT_CUDAGRAPH_HEAD", "0") == "1"
+        )
+        self.latent_qwen35_cg_block_table: torch.Tensor | None = None
+        self.latent_qwen35_cg_block_table_cols = 0
+        self.latent_qwen35_cg_input_ids = torch.empty(
+            self.max_num_reqs,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self.latent_qwen35_cg_positions = torch.empty(
+            self.max_num_reqs,
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.latent_qwen35_cg_hidden = torch.empty(
+            (self.max_num_reqs, self.inputs_embeds_size),
+            dtype=self.dtype,
+            device=self.device,
+        )
+        self.latent_qwen35_cg_slot_mapping = torch.empty(
+            self.max_num_reqs,
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.latent_qwen35_cg_seq_lens = torch.empty(
+            self.max_num_reqs,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self.latent_qwen35_compact_slots = self._make_buffer(
+            self.max_num_reqs,
+            dtype=torch.long,
+        )
+        self.latent_qwen35_compact_req_indices = self._make_buffer(
+            self.max_num_reqs,
+            dtype=torch.long,
+        )
+        self.latent_qwen35_cg_output_embeds = torch.empty(
+            (self.max_num_reqs, self.inputs_embeds_size),
+            dtype=self.dtype,
+            device=self.device,
+        )
+        self.latent_qwen35_cudagraph_head_disabled = False
+        self.latent_qwen35_head_cudagraph_precaptured = False
+        self.soft_thinking_embedding_weight: torch.Tensor | None = None
         self.discard_request_mask = self._make_buffer(
             self.max_num_reqs, dtype=torch.bool
         )
@@ -1232,6 +1300,7 @@ class GPUModelRunner(
             latent_cfg = self._get_latent_qwen35_config(sampling_params)
             if latent_cfg:
                 req_state.latent_qwen35_active = True
+                req_state.latent_qwen35_checkpoint = str(latent_cfg["checkpoint"])
                 req_state.latent_qwen35_internal_positions = set()
                 req_state.latent_qwen35_think_close_token_id = int(
                     latent_cfg.get("think_close_token_id", 248069)
@@ -1239,6 +1308,32 @@ class GPUModelRunner(
                 req_state.latent_qwen35_max_internal_tokens = int(
                     latent_cfg.get("max_internal_tokens", 1200)
                 )
+                req_state.latent_qwen35_repeat_close_threshold = int(
+                    latent_cfg.get("repeat_close_threshold", 512)
+                )
+            soft_cfg = self._get_soft_thinking_config(sampling_params)
+            if soft_cfg:
+                if latent_cfg:
+                    raise ValueError(
+                        "soft_thinking and latent_reasoning cannot be enabled "
+                        "on the same request."
+                    )
+                req_state.soft_thinking_active = True
+                req_state.soft_thinking_internal_positions = set()
+                req_state.soft_thinking_think_close_token_id = int(
+                    soft_cfg.get("think_close_token_id", 248069)
+                )
+                req_state.soft_thinking_max_internal_tokens = int(
+                    soft_cfg.get("max_internal_tokens", 256)
+                )
+                req_state.soft_thinking_entropy_threshold = float(
+                    soft_cfg.get("entropy_threshold", 0.0)
+                )
+                req_state.soft_thinking_temperature = float(
+                    soft_cfg.get("temperature", 1.0)
+                )
+                req_state.soft_thinking_top_k = int(soft_cfg.get("top_k", 64))
+                req_state.soft_thinking_top_p = float(soft_cfg.get("top_p", 1.0))
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
 
@@ -1824,15 +1919,25 @@ class GPUModelRunner(
         if not latent_slots:
             return
 
+        latent_embeds_tensor = torch.stack(latent_embeds).to(
+            device=self.device,
+            dtype=self.dtype,
+        )
+        if len(latent_slots) == total_num_scheduled_tokens and all(
+            slot == idx for idx, slot in enumerate(latent_slots)
+        ):
+            self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(
+                latent_embeds_tensor
+            )
+            self.latent_qwen35_use_inputs_embeds = True
+            return
+
         token_embeds = self.model.embed_input_ids(
             input_ids=self.input_ids.gpu[:total_num_scheduled_tokens]
         )
         self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(token_embeds)
         slot_tensor = torch.tensor(latent_slots, dtype=torch.long, device=self.device)
-        self.inputs_embeds.gpu[slot_tensor] = torch.stack(latent_embeds).to(
-            device=self.device,
-            dtype=self.dtype,
-        )
+        self.inputs_embeds.gpu[slot_tensor] = latent_embeds_tensor
         self.latent_qwen35_use_inputs_embeds = True
 
     def _prepare_latent_qwen35_native_inputs_embeds(
@@ -1841,10 +1946,9 @@ class GPUModelRunner(
         total_num_scheduled_tokens: int,
         slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
     ) -> None:
-        profile_path = os.getenv("LATENT_QWEN35_PHASE_PROFILE_JSONL")
+        profile_path = self.latent_qwen35_phase_profile_path
         profile_start = time.perf_counter() if profile_path else 0.0
         profile_entries = 0
-        self.latent_qwen35_use_inputs_embeds = False
         self.latent_qwen35_last_native_latent_positions.clear()
         if self.latent_qwen35_native_head is None:
             return
@@ -1863,11 +1967,10 @@ class GPUModelRunner(
         if group_slot_mapping is None:
             return
 
-        entries: list[tuple[int, int, int, int, torch.Tensor]] = []
+        entries: list[tuple[int, int, int, torch.Tensor]] = []
         req_indices_np = self.latent_qwen35_last_req_indices_np
         positions_np = self.latent_qwen35_last_positions_np
         pending_req_ids = self.latent_qwen35_pending_req_ids
-        pending_token_ids = self.latent_qwen35_pending_token_ids_np
         pending_positions = self.latent_qwen35_pending_positions_np
         pending_hidden_gpu = self.latent_qwen35_pending_hidden.gpu
         fast_all_slots_latent = (
@@ -1889,33 +1992,36 @@ class GPUModelRunner(
 
         if fast_all_slots_latent:
             profile_entries = total_num_scheduled_tokens
-            compact_input_ids = torch.as_tensor(
-                pending_token_ids[:total_num_scheduled_tokens],
-                dtype=torch.int32,
-                device=self.device,
+            compact_input_ids = self.input_ids.gpu[
+                :total_num_scheduled_tokens
+            ]
+            compact_positions = self.positions[:total_num_scheduled_tokens]
+            compact_hidden = pending_hidden_gpu[:total_num_scheduled_tokens]
+            req_indices, query_lens = self._get_latent_qwen35_decode_lists(
+                total_num_scheduled_tokens
             )
-            compact_positions = torch.as_tensor(
-                positions_np[:total_num_scheduled_tokens],
-                dtype=torch.int64,
-                device=self.device,
-            )
-            compact_hidden = pending_hidden_gpu[:total_num_scheduled_tokens].to(
-                device=self.device,
-                dtype=self.dtype,
-            )
-            embeds = self._run_latent_qwen35_native_head(
-                req_indices=list(range(total_num_scheduled_tokens)),
-                query_lens=[1] * total_num_scheduled_tokens,
-                seq_lens=[
-                    int(pos) + 1
-                    for pos in positions_np[:total_num_scheduled_tokens]
-                ],
+            compact_slot_mapping = group_slot_mapping[:total_num_scheduled_tokens]
+            embeds = self._run_latent_qwen35_native_head_cudagraph_decode(
+                num_tokens=total_num_scheduled_tokens,
                 input_ids=compact_input_ids,
                 positions=compact_positions,
                 hidden_states=compact_hidden,
-                slot_mapping=group_slot_mapping[:total_num_scheduled_tokens],
-                return_embeds=True,
+                slot_mapping=compact_slot_mapping,
             )
+            if embeds is None:
+                embeds = self._run_latent_qwen35_native_head(
+                    req_indices=req_indices,
+                    query_lens=query_lens,
+                    seq_lens=[
+                        int(pos) + 1
+                        for pos in positions_np[:total_num_scheduled_tokens]
+                    ],
+                    input_ids=compact_input_ids,
+                    positions=compact_positions,
+                    hidden_states=compact_hidden,
+                    slot_mapping=compact_slot_mapping,
+                    return_embeds=True,
+                )
             if embeds is None:
                 return
 
@@ -1965,7 +2071,6 @@ class GPUModelRunner(
                     req_idx,
                     slot,
                     pos,
-                    int(pending_token_ids[req_idx]),
                     pending_hidden_gpu[req_idx],
                 )
             )
@@ -1981,43 +2086,134 @@ class GPUModelRunner(
         all_entries_req_contiguous = all(
             item[0] == idx for idx, item in enumerate(entries)
         )
-        compact_input_ids = torch.tensor(
-            [item[3] for item in entries],
-            dtype=torch.int32,
-            device=self.device,
+        prefix_slots_latent = (
+            not all_slots_latent
+            and all_entries_req_contiguous
+            and all(item[1] == idx for idx, item in enumerate(entries))
         )
-        if all_slots_latent:
-            compact_positions = torch.as_tensor(
-                positions_np[:total_num_scheduled_tokens],
-                dtype=torch.int64,
-                device=self.device,
+        if prefix_slots_latent:
+            prefix_len = len(entries)
+            embeds = self._run_latent_qwen35_native_head_cudagraph_decode(
+                num_tokens=prefix_len,
+                input_ids=self.input_ids.gpu[:prefix_len],
+                positions=self.positions[:prefix_len],
+                hidden_states=pending_hidden_gpu[:prefix_len],
+                slot_mapping=group_slot_mapping[:prefix_len],
             )
-        else:
-            compact_positions = torch.tensor(
-                [item[2] for item in entries],
-                dtype=torch.int64,
-                device=self.device,
-            )
-        if all_slots_latent and all_entries_req_contiguous:
-            compact_hidden = pending_hidden_gpu[:total_num_scheduled_tokens].to(
-                device=self.device,
-                dtype=self.dtype,
-            )
-        else:
-            compact_hidden = torch.stack([item[4] for item in entries]).to(
-                device=self.device,
-                dtype=self.dtype,
-            )
+            if embeds is not None:
+                token_embeds = self.model.embed_input_ids(
+                    input_ids=self.input_ids.gpu[:total_num_scheduled_tokens]
+                )
+                self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(token_embeds)
+                self.inputs_embeds.gpu[:prefix_len].copy_(
+                    embeds.to(device=self.device, dtype=self.dtype)
+                )
+                self.latent_qwen35_last_native_latent_positions.update(
+                    (req_idx, int(positions_np[req_idx]))
+                    for req_idx in range(prefix_len)
+                )
+                for req_idx in range(prefix_len):
+                    self.latent_qwen35_pending_req_ids[req_idx] = None
+                self.latent_qwen35_num_pending = max(
+                    0,
+                    self.latent_qwen35_num_pending - prefix_len,
+                )
+                self.latent_qwen35_use_inputs_embeds = True
+                if profile_path:
+                    with open(profile_path, "a") as f:
+                        f.write(
+                            json.dumps(
+                                {
+                                    "kind": "prepare_latent_native_inputs",
+                                    "num_entries": int(profile_entries),
+                                    "total_num_scheduled_tokens": int(
+                                        total_num_scheduled_tokens
+                                    ),
+                                    "fast_all_slots_latent": False,
+                                    "fast_prefix_slots_latent": True,
+                                    "elapsed_ms": (
+                                        time.perf_counter() - profile_start
+                                    )
+                                    * 1000.0,
+                                }
+                            )
+                            + "\n"
+                        )
+                return
         if all_slots_latent:
             scheduled_slots = None
+            compact_req_indices = None
             compact_slot_mapping = group_slot_mapping[:total_num_scheduled_tokens]
         else:
-            scheduled_slots = torch.tensor(
-                [item[1] for item in entries],
-                dtype=torch.long,
-                device=self.device,
-            )
-            compact_slot_mapping = group_slot_mapping[scheduled_slots]
+            compact_indices = self._get_latent_qwen35_compact_indices(entries)
+            if compact_indices is None:
+                scheduled_slots = torch.tensor(
+                    [item[1] for item in entries],
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                compact_req_indices = None
+                compact_slot_mapping = group_slot_mapping[scheduled_slots]
+            else:
+                scheduled_slots, compact_req_indices = compact_indices
+                compact_slot_mapping = self.latent_qwen35_cg_slot_mapping[
+                    : len(entries)
+                ]
+                torch.index_select(
+                    group_slot_mapping,
+                    0,
+                    scheduled_slots,
+                    out=compact_slot_mapping,
+                )
+
+        if all_slots_latent:
+            compact_input_ids = self.input_ids.gpu[
+                :total_num_scheduled_tokens
+            ]
+            compact_positions = self.positions[:total_num_scheduled_tokens]
+        else:
+            if compact_req_indices is None:
+                compact_input_ids = self.input_ids.gpu[scheduled_slots]
+                compact_positions = self.positions[scheduled_slots]
+            else:
+                compact_input_ids = self.latent_qwen35_cg_input_ids[: len(entries)]
+                compact_positions = self.latent_qwen35_cg_positions[: len(entries)]
+                torch.index_select(
+                    self.input_ids.gpu,
+                    0,
+                    scheduled_slots,
+                    out=compact_input_ids,
+                )
+                torch.index_select(
+                    self.positions,
+                    0,
+                    scheduled_slots,
+                    out=compact_positions,
+                )
+        if all_entries_req_contiguous:
+            compact_hidden = pending_hidden_gpu[: len(entries)]
+        else:
+            if compact_req_indices is None:
+                compact_indices = self._get_latent_qwen35_compact_indices(entries)
+                if compact_indices is None:
+                    compact_hidden = torch.stack([item[3] for item in entries])
+                else:
+                    _scheduled_slots, compact_req_indices = compact_indices
+                    compact_hidden = self.latent_qwen35_cg_hidden[: len(entries)]
+                    torch.index_select(
+                        pending_hidden_gpu,
+                        0,
+                        compact_req_indices,
+                        out=compact_hidden,
+                    )
+            else:
+                compact_hidden = self.latent_qwen35_cg_hidden[: len(entries)]
+                torch.index_select(
+                    pending_hidden_gpu,
+                    0,
+                    compact_req_indices,
+                    out=compact_hidden,
+                )
 
         req_indices: list[int] = []
         query_lens: list[int] = []
@@ -2033,16 +2229,50 @@ class GPUModelRunner(
                 query_lens[-1] += 1
                 seq_lens[-1] = pos + 1
 
-        embeds = self._run_latent_qwen35_native_head(
-            req_indices=req_indices,
-            query_lens=query_lens,
-            seq_lens=seq_lens,
-            input_ids=compact_input_ids,
-            positions=compact_positions,
-            hidden_states=compact_hidden,
-            slot_mapping=compact_slot_mapping,
-            return_embeds=True,
+        compact_req_idx_tensor = (
+            compact_req_indices
+            if compact_req_indices is not None and len(req_indices) == len(entries)
+            else None
         )
+        embeds = None
+        if (
+            self.latent_qwen35_compact_cudagraph_head_enabled
+            and compact_req_idx_tensor is not None
+            and all(qlen == 1 for qlen in query_lens)
+        ):
+            compact_block_table = self._get_latent_qwen35_cg_block_table(
+                kv_cache_gid=gid,
+                num_rows=len(req_indices),
+                req_idx_tensor=compact_req_idx_tensor,
+            )
+            if compact_block_table is not None:
+                torch.index_select(
+                    self.seq_lens,
+                    0,
+                    compact_req_idx_tensor,
+                    out=self.latent_qwen35_cg_seq_lens[: len(req_indices)],
+                )
+                embeds = self._run_latent_qwen35_native_head_cudagraph_decode(
+                    num_tokens=len(req_indices),
+                    input_ids=compact_input_ids,
+                    positions=compact_positions,
+                    hidden_states=compact_hidden,
+                    slot_mapping=compact_slot_mapping,
+                    seq_lens=self.latent_qwen35_cg_seq_lens[: len(req_indices)],
+                    compact_block_table=compact_block_table,
+                )
+        if embeds is None:
+            embeds = self._run_latent_qwen35_native_head(
+                req_indices=req_indices,
+                query_lens=query_lens,
+                seq_lens=seq_lens,
+                input_ids=compact_input_ids,
+                positions=compact_positions,
+                hidden_states=compact_hidden,
+                slot_mapping=compact_slot_mapping,
+                return_embeds=True,
+                req_idx_tensor=compact_req_idx_tensor,
+            )
         if embeds is None:
             return
 
@@ -2059,7 +2289,7 @@ class GPUModelRunner(
             (item[0], item[2]) for item in entries
         )
         for item in entries:
-            req_idx, _slot, _pos, _token_id, _prev_hidden = item
+            req_idx, _slot, _pos, _prev_hidden = item
             self.latent_qwen35_pending_req_ids[req_idx] = None
         self.latent_qwen35_num_pending = max(
             0,
@@ -2091,7 +2321,7 @@ class GPUModelRunner(
         total_num_scheduled_tokens: int,
         slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
     ) -> None:
-        profile_path = os.getenv("LATENT_QWEN35_PHASE_PROFILE_JSONL")
+        profile_path = self.latent_qwen35_phase_profile_path
         profile_start = time.perf_counter() if profile_path else 0.0
         profile_entries = 0
         if (
@@ -2116,11 +2346,6 @@ class GPUModelRunner(
             req_idx = int(req_indices_np[slot])
             req_id = self.input_batch.req_ids[req_idx]
             req_state = self.requests[req_id]
-            checkpoint = self._get_latent_qwen35_checkpoint(req_state.sampling_params)
-            if checkpoint is None:
-                continue
-            if self._ensure_latent_qwen35_native_head(req_state.sampling_params) is None:
-                continue
             pos = int(positions_np[slot])
             if (req_idx, pos) in self.latent_qwen35_last_native_latent_positions:
                 continue
@@ -2136,6 +2361,13 @@ class GPUModelRunner(
             )
             if not req_state.latent_qwen35_active and not has_pending:
                 continue
+            checkpoint = req_state.latent_qwen35_checkpoint
+            if checkpoint is None:
+                continue
+            if self._ensure_latent_qwen35_native_head_for_checkpoint(
+                checkpoint
+            ) is None:
+                continue
             entries.append((req_idx, slot, pos))
 
         if not entries:
@@ -2148,41 +2380,64 @@ class GPUModelRunner(
 
         if all_slots_latent:
             scheduled_slots = None
+            compact_req_indices = None
             compact_slot_mapping = group_slot_mapping[:total_num_scheduled_tokens]
         else:
-            scheduled_slots = torch.tensor(
-                [item[1] for item in entries],
-                dtype=torch.long,
-                device=self.device,
-            )
-            compact_slot_mapping = group_slot_mapping[scheduled_slots]
+            compact_indices = self._get_latent_qwen35_compact_indices(entries)
+            if compact_indices is None:
+                scheduled_slots = torch.tensor(
+                    [item[1] for item in entries],
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                compact_req_indices = None
+                compact_slot_mapping = group_slot_mapping[scheduled_slots]
+            else:
+                scheduled_slots, compact_req_indices = compact_indices
+                compact_slot_mapping = self.latent_qwen35_cg_slot_mapping[
+                    : len(entries)
+                ]
+                torch.index_select(
+                    group_slot_mapping,
+                    0,
+                    scheduled_slots,
+                    out=compact_slot_mapping,
+                )
 
         if all_slots_latent:
             compact_input_ids = self.input_ids.gpu[
                 :total_num_scheduled_tokens
-            ].to(dtype=torch.int32)
-            compact_hidden = hidden_states[
-                :total_num_scheduled_tokens
-            ].to(device=self.device, dtype=self.dtype)
+            ]
+            compact_hidden = hidden_states[:total_num_scheduled_tokens]
+            compact_positions = self.positions[:total_num_scheduled_tokens]
         else:
             assert scheduled_slots is not None
-            compact_input_ids = self.input_ids.gpu[scheduled_slots].to(dtype=torch.int32)
-            compact_hidden = hidden_states[scheduled_slots].to(
-                device=self.device,
-                dtype=self.dtype,
-            )
-        if all_slots_latent:
-            compact_positions = torch.as_tensor(
-                positions_np[:total_num_scheduled_tokens],
-                dtype=torch.int64,
-                device=self.device,
-            )
-        else:
-            compact_positions = torch.tensor(
-                [item[2] for item in entries],
-                dtype=torch.int64,
-                device=self.device,
-            )
+            if len(entries) > self.max_num_reqs:
+                compact_input_ids = self.input_ids.gpu[scheduled_slots]
+                compact_hidden = hidden_states[scheduled_slots]
+                compact_positions = self.positions[scheduled_slots]
+            else:
+                compact_input_ids = self.latent_qwen35_cg_input_ids[: len(entries)]
+                compact_hidden = self.latent_qwen35_cg_hidden[: len(entries)]
+                compact_positions = self.latent_qwen35_cg_positions[: len(entries)]
+                torch.index_select(
+                    self.input_ids.gpu,
+                    0,
+                    scheduled_slots,
+                    out=compact_input_ids,
+                )
+                torch.index_select(
+                    hidden_states,
+                    0,
+                    scheduled_slots,
+                    out=compact_hidden,
+                )
+                torch.index_select(
+                    self.positions,
+                    0,
+                    scheduled_slots,
+                    out=compact_positions,
+                )
 
         req_indices: list[int] = []
         query_lens: list[int] = []
@@ -2198,6 +2453,11 @@ class GPUModelRunner(
                 query_lens[-1] += 1
                 seq_lens[-1] = pos + 1
 
+        compact_req_idx_tensor = (
+            compact_req_indices
+            if compact_req_indices is not None and len(req_indices) == len(entries)
+            else None
+        )
         self._run_latent_qwen35_native_head(
             req_indices=req_indices,
             query_lens=query_lens,
@@ -2207,6 +2467,7 @@ class GPUModelRunner(
             hidden_states=compact_hidden,
             slot_mapping=compact_slot_mapping,
             return_embeds=False,
+            req_idx_tensor=compact_req_idx_tensor,
         )
         if profile_path:
             with open(profile_path, "a") as f:
@@ -2246,6 +2507,187 @@ class GPUModelRunner(
                 "LLM(..., async_scheduling=False) for offline inference."
             )
         return latent_cfg
+
+    def _get_latent_qwen35_decode_lists(
+        self,
+        num_reqs: int,
+    ) -> tuple[list[int], list[int]]:
+        cached = self.latent_qwen35_decode_list_cache.get(num_reqs)
+        if cached is not None:
+            return cached
+        cached = (list(range(num_reqs)), [1] * num_reqs)
+        self.latent_qwen35_decode_list_cache[num_reqs] = cached
+        return cached
+
+    def _get_latent_qwen35_compact_indices(
+        self,
+        entries: Sequence[Any],
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        num_entries = len(entries)
+        if num_entries > self.max_num_reqs:
+            return None
+        slots_np = self.latent_qwen35_compact_slots.np
+        req_indices_np = self.latent_qwen35_compact_req_indices.np
+        for idx, item in enumerate(entries):
+            req_indices_np[idx] = int(item[0])
+            slots_np[idx] = int(item[1])
+        self.latent_qwen35_compact_slots.copy_to_gpu(num_entries)
+        self.latent_qwen35_compact_req_indices.copy_to_gpu(num_entries)
+        return (
+            self.latent_qwen35_compact_slots.gpu[:num_entries],
+            self.latent_qwen35_compact_req_indices.gpu[:num_entries],
+        )
+
+    def _ensure_latent_qwen35_cg_block_table(
+        self,
+        *,
+        kv_cache_gid: int,
+    ) -> torch.Tensor:
+        template = self.input_batch.block_table[kv_cache_gid].get_device_tensor(
+            self.max_num_reqs
+        )
+        num_cols = int(template.shape[1])
+        if (
+            self.latent_qwen35_cg_block_table is None
+            or self.latent_qwen35_cg_block_table_cols != num_cols
+        ):
+            self.latent_qwen35_cg_block_table = torch.empty(
+                (self.max_num_reqs, num_cols),
+                dtype=template.dtype,
+                device=self.device,
+            )
+            self.latent_qwen35_cg_block_table_cols = num_cols
+        return self.latent_qwen35_cg_block_table
+
+    def _get_latent_qwen35_cg_block_table(
+        self,
+        *,
+        kv_cache_gid: int,
+        num_rows: int,
+        req_idx_tensor: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if num_rows <= 0 or num_rows > self.max_num_reqs:
+            return None
+        block_table = self.input_batch.block_table[kv_cache_gid].get_device_tensor(
+            self.input_batch.num_reqs
+        )
+        cg_block_table = self._ensure_latent_qwen35_cg_block_table(
+            kv_cache_gid=kv_cache_gid
+        )
+        out = cg_block_table[:num_rows]
+        torch.index_select(block_table, 0, req_idx_tensor[:num_rows], out=out)
+        return cg_block_table
+
+    def _get_soft_thinking_config(
+        self,
+        sampling_params: SamplingParams | None,
+    ) -> dict[str, object] | None:
+        extra_args = None if sampling_params is None else sampling_params.extra_args
+        if not extra_args:
+            return None
+        soft_cfg = extra_args.get("soft_thinking")
+        if soft_cfg is None or soft_cfg is False:
+            return None
+        if soft_cfg is True:
+            soft_cfg = {}
+        if not isinstance(soft_cfg, dict):
+            raise ValueError(
+                "SamplingParams.extra_args['soft_thinking'] must be a dict or true."
+            )
+        if self.use_async_scheduling:
+            raise ValueError(
+                "Soft Thinking currently requires async_scheduling=False. "
+                "The worker must feed a probability-mixture embedding into "
+                "the next decode step."
+            )
+        normalized = dict(soft_cfg)
+        normalized["think_close_token_id"] = int(
+            normalized.get("think_close_token_id", 248069)
+        )
+        normalized["max_internal_tokens"] = int(
+            normalized.get(
+                "max_internal_tokens",
+                normalized.get("max_soft_steps", 256),
+            )
+        )
+        normalized["entropy_threshold"] = float(
+            normalized.get("entropy_threshold", 0.0)
+        )
+        normalized["temperature"] = float(normalized.get("temperature", 1.0))
+        normalized["top_k"] = int(normalized.get("top_k", 64))
+        normalized["top_p"] = float(normalized.get("top_p", 1.0))
+        return normalized
+
+    def _get_soft_thinking_embedding_weight(self) -> torch.Tensor:
+        if self.soft_thinking_embedding_weight is not None:
+            return self.soft_thinking_embedding_weight
+        if self.parallel_config.tensor_parallel_size != 1:
+            raise ValueError(
+                "Soft Thinking currently supports tensor_parallel_size=1 only, "
+                "because mixture embeddings are computed from full-vocab logits."
+            )
+        paths = (
+            ("model", "embed_tokens"),
+            ("model", "model", "embed_tokens"),
+            ("language_model", "model", "embed_tokens"),
+            ("model", "language_model", "model", "embed_tokens"),
+        )
+        for path in paths:
+            module: object = self.model
+            for attr in path:
+                module = getattr(module, attr, None)
+                if module is None:
+                    break
+            weight = getattr(module, "weight", None)
+            if isinstance(weight, torch.Tensor):
+                self.soft_thinking_embedding_weight = weight
+                return weight
+        raise RuntimeError("Unable to locate input embedding weight for Soft Thinking.")
+
+    def _compute_soft_thinking_next_embed(
+        self,
+        *,
+        logits_row: torch.Tensor,
+        entropy_threshold: float,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+    ) -> tuple[int, float, torch.Tensor]:
+        embedding_weight = self._get_soft_thinking_embedding_weight()
+        vocab_size = min(int(logits_row.shape[-1]), int(embedding_weight.shape[0]))
+        logits_row = logits_row[:vocab_size].float()
+        inv_temperature = 1.0 / max(float(temperature), 1e-6)
+        if top_k > 0:
+            k = min(int(top_k), vocab_size)
+            values, indices = torch.topk(logits_row, k=k, dim=-1)
+        else:
+            values = logits_row
+            indices = torch.arange(vocab_size, device=logits_row.device)
+        values = values * inv_temperature
+
+        if top_p < 1.0:
+            sorted_values, order = torch.sort(values, descending=True)
+            sorted_probs = torch.softmax(sorted_values, dim=-1)
+            cumulative = torch.cumsum(sorted_probs, dim=-1)
+            mask = cumulative > float(top_p)
+            if mask.numel() > 1:
+                mask[1:] = mask[:-1].clone()
+            mask[0] = False
+            sorted_values = sorted_values.masked_fill(mask, float("-inf"))
+            values = torch.empty_like(values).scatter(0, order, sorted_values)
+
+        probs = torch.softmax(values, dim=-1)
+        argmax_id = int(indices[int(torch.argmax(probs).item())].item())
+        entropy = float("inf")
+        if entropy_threshold > 0.0:
+            p_safe = probs.clamp_min(1e-12)
+            entropy = float(-(p_safe * p_safe.log()).sum().item())
+        selected_weight = embedding_weight[indices].to(
+            device=self.device,
+            dtype=self.dtype,
+        )
+        soft_embed = probs.to(dtype=self.dtype).unsqueeze(0).matmul(selected_weight)
+        return argmax_id, entropy, soft_embed.squeeze(0)
 
     def _get_latent_qwen35_checkpoint(self, sampling_params: SamplingParams) -> str | None:
         latent_cfg = self._get_latent_qwen35_config(sampling_params)
@@ -2297,6 +2739,12 @@ class GPUModelRunner(
         checkpoint = self._get_latent_qwen35_checkpoint(sampling_params)
         if checkpoint is None:
             return None
+        return self._ensure_latent_qwen35_native_head_for_checkpoint(checkpoint)
+
+    def _ensure_latent_qwen35_native_head_for_checkpoint(
+        self,
+        checkpoint: str,
+    ) -> torch.nn.Module | None:
         head = self.latent_qwen35_native_head
         if head is None or not self.latent_qwen35_native_layer_names:
             return None
@@ -2327,6 +2775,7 @@ class GPUModelRunner(
             self.latent_qwen35_native_forward = head.forward
             self.latent_qwen35_native_forward_compiled = False
         self.latent_qwen35_native_checkpoint = checkpoint
+        self._maybe_precapture_latent_qwen35_head_cudagraphs()
         return head
 
     def _ensure_latent_qwen35_head(
@@ -2483,6 +2932,10 @@ class GPUModelRunner(
         seq_lens: list[int],
         positions: torch.Tensor,
         slot_mapping: torch.Tensor,
+        decode_seq_lens_tensor: torch.Tensor | None = None,
+        block_table_num_reqs: int | None = None,
+        req_idx_tensor_override: torch.Tensor | None = None,
+        block_table_tensor_override: torch.Tensor | None = None,
     ) -> tuple[dict[str, AttentionMetadata], dict[str, torch.Tensor]] | None:
         found = self._get_latent_qwen35_native_attn_group()
         if found is None:
@@ -2517,20 +2970,40 @@ class GPUModelRunner(
         kv_cache_spec = self.kv_cache_config.kv_cache_groups[gid].kv_cache_spec
         if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
             return None
-        block_table = self.input_batch.block_table[gid].get_device_tensor(
-            self.input_batch.num_reqs
-        )
-        if req_indices_are_contiguous:
-            block_table_tensor = block_table[:num_reqs]
+        req_idx_tensor: torch.Tensor | None = None
+        if block_table_tensor_override is not None:
+            block_table_tensor = block_table_tensor_override[:num_reqs]
         else:
-            req_idx_tensor = torch.tensor(
-                req_indices,
-                dtype=torch.long,
-                device=self.device,
+            block_table_rows = self.input_batch.num_reqs
+            if block_table_num_reqs is not None:
+                block_table_rows = max(block_table_rows, int(block_table_num_reqs))
+            block_table = self.input_batch.block_table[gid].get_device_tensor(
+                block_table_rows
             )
-            block_table_tensor = block_table.index_select(0, req_idx_tensor)
+            if req_indices_are_contiguous:
+                block_table_tensor = block_table[:num_reqs]
+            else:
+                if (
+                    decode_only
+                    and req_idx_tensor_override is not None
+                    and int(req_idx_tensor_override.shape[0]) >= num_reqs
+                ):
+                    req_idx_tensor = req_idx_tensor_override[:num_reqs]
+                else:
+                    req_idx_tensor = torch.tensor(
+                        req_indices,
+                        dtype=torch.long,
+                        device=self.device,
+                    )
+                block_table_tensor = block_table.index_select(0, req_idx_tensor)
         if decode_only:
-            seq_lens_tensor = positions.to(dtype=torch.int32) + 1
+            if decode_seq_lens_tensor is not None:
+                seq_lens_tensor = decode_seq_lens_tensor[:num_reqs]
+            elif req_indices_are_contiguous:
+                seq_lens_tensor = self.seq_lens[:num_reqs]
+            else:
+                assert req_idx_tensor is not None
+                seq_lens_tensor = self.seq_lens.index_select(0, req_idx_tensor)
             is_prefilling = self.latent_qwen35_false_prefill_cache.get(num_reqs)
             if is_prefilling is None:
                 is_prefilling = torch.zeros(
@@ -2574,6 +3047,100 @@ class GPUModelRunner(
         )
         return {layer_name: metadata}, {layer_name: slot_mapping}
 
+    def _get_latent_qwen35_cudagraph_num_tokens(self, num_tokens: int) -> int:
+        capture_sizes = self.compilation_config.cudagraph_capture_sizes or []
+        for size in capture_sizes:
+            size = int(size)
+            if num_tokens <= size <= self.max_num_reqs:
+                return size
+        return num_tokens
+
+    def _get_latent_qwen35_cudagraph_precapture_sizes(self) -> list[int]:
+        max_size = int(os.getenv("LATENT_QWEN35_CUDAGRAPH_PRECAPTURE_MAX", "64"))
+        if max_size <= 0:
+            return []
+        max_size = min(max_size, self.max_num_reqs)
+        capture_sizes = self.compilation_config.cudagraph_capture_sizes or []
+        sizes = [
+            int(size)
+            for size in capture_sizes
+            if 0 < int(size) <= max_size
+        ]
+        if not sizes:
+            sizes = [max_size]
+        return sorted(set(sizes))
+
+    def _maybe_precapture_latent_qwen35_head_cudagraphs(self) -> None:
+        if (
+            not self.latent_qwen35_cudagraph_head_enabled
+            or self.latent_qwen35_cudagraph_head_disabled
+            or self.latent_qwen35_head_cudagraph_precaptured
+            or self.latent_qwen35_native_head is None
+        ):
+            return
+        sizes = self._get_latent_qwen35_cudagraph_precapture_sizes()
+        if not sizes:
+            self.latent_qwen35_head_cudagraph_precaptured = True
+            return
+        max_size = sizes[-1]
+        saved_input_ids = self.input_ids.gpu[:max_size].clone()
+        saved_positions = self.positions[:max_size].clone()
+        saved_pending_hidden = self.latent_qwen35_pending_hidden.gpu[
+            :max_size
+        ].clone()
+        try:
+            self.input_ids.gpu[:max_size].fill_(0)
+            self.positions[:max_size].fill_(0)
+            self.latent_qwen35_pending_hidden.gpu[:max_size].zero_()
+            self.latent_qwen35_cg_slot_mapping[:max_size].fill_(-1)
+            self.latent_qwen35_cg_seq_lens[:max_size].fill_(1)
+            for size in sizes:
+                if self.latent_qwen35_cudagraph_head_disabled:
+                    break
+                self._run_latent_qwen35_native_head_cudagraph_decode(
+                    num_tokens=size,
+                    input_ids=self.input_ids.gpu[:size],
+                    positions=self.positions[:size],
+                    hidden_states=self.latent_qwen35_pending_hidden.gpu[:size],
+                    slot_mapping=self.latent_qwen35_cg_slot_mapping[:size],
+                    seq_lens=self.latent_qwen35_cg_seq_lens[:size],
+                )
+            if (
+                self.latent_qwen35_compact_cudagraph_head_enabled
+                and not self.latent_qwen35_cudagraph_head_disabled
+            ):
+                found = self._get_latent_qwen35_native_attn_group()
+                if found is not None:
+                    gid, _attn_group, _layer_name = found
+                    compact_block_table = self._ensure_latent_qwen35_cg_block_table(
+                        kv_cache_gid=gid
+                    )
+                    self.latent_qwen35_cg_input_ids[:max_size].fill_(0)
+                    self.latent_qwen35_cg_positions[:max_size].fill_(0)
+                    self.latent_qwen35_cg_hidden[:max_size].zero_()
+                    self.latent_qwen35_cg_slot_mapping[:max_size].fill_(-1)
+                    self.latent_qwen35_cg_seq_lens[:max_size].fill_(1)
+                    compact_block_table[:max_size].zero_()
+                    for size in sizes:
+                        if self.latent_qwen35_cudagraph_head_disabled:
+                            break
+                        self._run_latent_qwen35_native_head_cudagraph_decode(
+                            num_tokens=size,
+                            input_ids=self.latent_qwen35_cg_input_ids[:size],
+                            positions=self.latent_qwen35_cg_positions[:size],
+                            hidden_states=self.latent_qwen35_cg_hidden[:size],
+                            slot_mapping=self.latent_qwen35_cg_slot_mapping[:size],
+                            seq_lens=self.latent_qwen35_cg_seq_lens[:size],
+                            compact_block_table=compact_block_table,
+                        )
+        finally:
+            self.input_ids.gpu[:max_size].copy_(saved_input_ids)
+            self.positions[:max_size].copy_(saved_positions)
+            self.latent_qwen35_pending_hidden.gpu[:max_size].copy_(
+                saved_pending_hidden
+            )
+        self.latent_qwen35_head_cudagraph_precaptured = True
+
     def _run_latent_qwen35_native_head(
         self,
         *,
@@ -2585,21 +3152,42 @@ class GPUModelRunner(
         hidden_states: torch.Tensor,
         slot_mapping: torch.Tensor,
         return_embeds: bool,
+        req_idx_tensor: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         head = self.latent_qwen35_native_head
         if head is None:
             return None
+        profile_path = self.latent_qwen35_profile_path
+        detail_profile_path = self.latent_qwen35_detail_profile_path
+        metadata_start = time.perf_counter() if detail_profile_path else 0.0
         meta = self._build_latent_qwen35_native_metadata(
             req_indices=req_indices,
             query_lens=query_lens,
             seq_lens=seq_lens,
             positions=positions,
             slot_mapping=slot_mapping,
+            req_idx_tensor_override=req_idx_tensor,
         )
         if meta is None:
             return None
         attn_metadata, slot_mappings = meta
-        profile_path = os.getenv("LATENT_QWEN35_PROFILE_JSONL")
+        if detail_profile_path:
+            with open(detail_profile_path, "a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "kind": "mtp_metadata",
+                            "tokens": int(input_ids.shape[0]),
+                            "reqs": len(req_indices),
+                            "return_embeds": return_embeds,
+                            "elapsed_ms": (
+                                time.perf_counter() - metadata_start
+                            )
+                            * 1000.0,
+                        }
+                    )
+                    + "\n"
+                )
         start_event = end_event = None
         if profile_path:
             start_event = torch.cuda.Event(enable_timing=True)
@@ -2620,13 +3208,13 @@ class GPUModelRunner(
                     positions=positions,
                     hidden_states=hidden_states,
                 )
-            except Exception:
+            except Exception as e:
                 if not self.latent_qwen35_native_forward_compiled:
                     raise
                 logger.warning_once(
                     "Compiled Qwen3.5 latent MTP forward failed. Falling "
-                    "back to eager head.forward for this engine instance.",
-                    exc_info=True,
+                    "back to eager head.forward for this engine instance: %s",
+                    str(e),
                 )
                 self.latent_qwen35_native_forward = head.forward
                 self.latent_qwen35_native_forward_compiled = False
@@ -2653,7 +3241,201 @@ class GPUModelRunner(
                 )
         if not return_embeds:
             return None
-        return head.compute_latent_embeds(mtp_hidden)  # type: ignore[attr-defined]
+        to_embed_start = to_embed_end = None
+        if detail_profile_path:
+            to_embed_start = torch.cuda.Event(enable_timing=True)
+            to_embed_end = torch.cuda.Event(enable_timing=True)
+            to_embed_start.record()
+        embeds = head.compute_latent_embeds(mtp_hidden)  # type: ignore[attr-defined]
+        if (
+            detail_profile_path
+            and to_embed_start is not None
+            and to_embed_end is not None
+        ):
+            to_embed_end.record()
+            to_embed_end.synchronize()
+            with open(detail_profile_path, "a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "kind": "mtp_to_embed",
+                            "tokens": int(input_ids.shape[0]),
+                            "reqs": len(req_indices),
+                            "elapsed_ms": float(
+                                to_embed_start.elapsed_time(to_embed_end)
+                            ),
+                        }
+                    )
+                    + "\n"
+                )
+        return embeds
+
+    def _run_latent_qwen35_native_head_cudagraph_decode(
+        self,
+        *,
+        num_tokens: int,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        seq_lens: torch.Tensor | None = None,
+        compact_block_table: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        if (
+            not self.latent_qwen35_cudagraph_head_enabled
+            or self.latent_qwen35_cudagraph_head_disabled
+            or num_tokens <= 0
+            or num_tokens > self.max_num_reqs
+        ):
+            return None
+        head = self.latent_qwen35_native_head
+        if head is None:
+            return None
+
+        graph_tokens = self._get_latent_qwen35_cudagraph_num_tokens(num_tokens)
+        if graph_tokens < num_tokens or graph_tokens > self.max_num_reqs:
+            return None
+        use_compact_inputs = compact_block_table is not None
+        graph_key: int | tuple[str, int]
+        graph_key = ("compact", graph_tokens) if use_compact_inputs else graph_tokens
+        static_input_ids = (
+            self.latent_qwen35_cg_input_ids[:graph_tokens]
+            if use_compact_inputs
+            else self.input_ids.gpu[:graph_tokens]
+        )
+        static_positions = (
+            self.latent_qwen35_cg_positions[:graph_tokens]
+            if use_compact_inputs
+            else self.positions[:graph_tokens]
+        )
+        static_hidden = (
+            self.latent_qwen35_cg_hidden[:graph_tokens]
+            if use_compact_inputs
+            else self.latent_qwen35_pending_hidden.gpu[:graph_tokens]
+        )
+        static_slot_mapping = self.latent_qwen35_cg_slot_mapping[:graph_tokens]
+        static_seq_lens = self.latent_qwen35_cg_seq_lens[:graph_tokens]
+        static_block_table = (
+            compact_block_table[:graph_tokens]
+            if compact_block_table is not None
+            else None
+        )
+        profile_path = self.latent_qwen35_profile_path
+        start_event = end_event = None
+        if profile_path:
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+
+        try:
+            if static_input_ids.data_ptr() != input_ids.data_ptr():
+                static_input_ids[:num_tokens].copy_(input_ids[:num_tokens])
+            if static_positions.data_ptr() != positions.data_ptr():
+                static_positions[:num_tokens].copy_(positions[:num_tokens])
+            if static_hidden.data_ptr() != hidden_states.data_ptr():
+                static_hidden[:num_tokens].copy_(hidden_states[:num_tokens])
+            if static_slot_mapping.data_ptr() != slot_mapping.data_ptr():
+                static_slot_mapping[:num_tokens].copy_(slot_mapping[:num_tokens])
+            if seq_lens is None:
+                if not use_compact_inputs:
+                    static_seq_lens[:num_tokens].copy_(self.seq_lens[:num_tokens])
+            else:
+                if static_seq_lens.data_ptr() != seq_lens.data_ptr():
+                    static_seq_lens[:num_tokens].copy_(seq_lens[:num_tokens])
+            if graph_tokens > num_tokens:
+                static_input_ids[num_tokens:graph_tokens].fill_(0)
+                static_positions[num_tokens:graph_tokens].fill_(0)
+                static_hidden[num_tokens:graph_tokens].zero_()
+                static_slot_mapping[num_tokens:graph_tokens].fill_(-1)
+                static_seq_lens[num_tokens:graph_tokens].fill_(1)
+                if static_block_table is not None:
+                    static_block_table[num_tokens:graph_tokens].zero_()
+
+            graph = self.latent_qwen35_head_cudagraphs.get(graph_key)
+            if graph is None:
+                req_indices, query_lens = self._get_latent_qwen35_decode_lists(
+                    graph_tokens
+                )
+                meta = self._build_latent_qwen35_native_metadata(
+                    req_indices=req_indices,
+                    query_lens=query_lens,
+                    seq_lens=[self.max_model_len] * graph_tokens,
+                    positions=static_positions,
+                    slot_mapping=static_slot_mapping,
+                    decode_seq_lens_tensor=static_seq_lens,
+                    block_table_num_reqs=graph_tokens,
+                    block_table_tensor_override=static_block_table,
+                )
+                if meta is None:
+                    return None
+                attn_metadata, slot_mappings = meta
+                self.latent_qwen35_head_cudagraph_metadata[graph_key] = meta
+
+                def run() -> None:
+                    with set_forward_context(
+                        attn_metadata,
+                        self.vllm_config,
+                        num_tokens=graph_tokens,
+                        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                        batch_descriptor=BatchDescriptor(num_tokens=graph_tokens),
+                        slot_mapping=slot_mappings,
+                    ):
+                        forward = self.latent_qwen35_native_forward or head.forward
+                        mtp_hidden = forward(
+                            input_ids=static_input_ids,
+                            positions=static_positions,
+                            hidden_states=static_hidden,
+                        )
+                        embeds = head.compute_latent_embeds(mtp_hidden)  # type: ignore[attr-defined]
+                        self.latent_qwen35_cg_output_embeds[:graph_tokens].copy_(
+                            embeds
+                        )
+
+                # First call compiles/warmups outside the captured graph.
+                run()
+                graph = torch.cuda.CUDAGraph()
+                if self.latent_qwen35_head_cudagraph_pool is None:
+                    self.latent_qwen35_head_cudagraph_pool = (
+                        torch.cuda.graph_pool_handle()
+                    )
+                with graph_capture(device=self.device):
+                    get_offloader().sync_prev_onload()
+                    with torch.cuda.graph(
+                        graph,
+                        pool=self.latent_qwen35_head_cudagraph_pool,
+                    ):
+                        run()
+                        get_offloader().join_after_forward()
+                self.latent_qwen35_head_cudagraphs[graph_key] = graph
+            else:
+                graph.replay()
+        except Exception as e:
+            self.latent_qwen35_cudagraph_head_disabled = True
+            logger.warning_once(
+                "Qwen3.5 latent MTP CUDA graph fast path failed; disabling "
+                "it for this engine instance: %s",
+                str(e),
+            )
+            return None
+
+        if profile_path and start_event is not None and end_event is not None:
+            end_event.record()
+            end_event.synchronize()
+            with open(profile_path, "a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "kind": "mtp_forward_cudagraph",
+                            "tokens": int(num_tokens),
+                            "graph_tokens": int(graph_tokens),
+                            "reqs": int(num_tokens),
+                            "return_embeds": True,
+                            "elapsed_ms": float(start_event.elapsed_time(end_event)),
+                        }
+                    )
+                    + "\n"
+                )
+        return self.latent_qwen35_cg_output_embeds[:num_tokens]
 
     def _get_encoder_seq_lens(
         self,
@@ -4319,7 +5101,7 @@ class GPUModelRunner(
         dict[str, int],
         list[int],
     ]:
-        profile_path = os.getenv("LATENT_QWEN35_PHASE_PROFILE_JSONL")
+        profile_path = self.latent_qwen35_phase_profile_path
         profile_start = time.perf_counter() if profile_path else 0.0
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -4382,36 +5164,78 @@ class GPUModelRunner(
                 if i not in invalid_req_indices_set
             }
 
-        hidden_offsets: list[int] | None = None
-        if not self.use_async_scheduling:
-            hidden_offsets = []
+        internal_sampled_token_ids = [[] for _ in req_ids_output_copy]
+        if not self.use_async_scheduling and valid_sampled_token_ids:
             hidden_offset = 0
-            for req_idx, req_id in enumerate(req_ids_output_copy):
-                hidden_offsets.append(hidden_offset)
+            loaded_native_checkpoint = self.latent_qwen35_native_checkpoint
+            for req_idx, sampled_ids in enumerate(valid_sampled_token_ids):
+                req_id = req_ids_output_copy[req_idx]
                 scheduled_len = int(
                     scheduler_output.num_scheduled_tokens.get(req_id, 0)
                 )
+                current_hidden_offset = hidden_offset
                 hidden_offset += scheduled_len
-
-        internal_sampled_token_ids = [[] for _ in req_ids_output_copy]
-        if not self.use_async_scheduling and valid_sampled_token_ids:
-            assert hidden_offsets is not None
-            for req_idx, sampled_ids in enumerate(valid_sampled_token_ids):
                 if len(sampled_ids) != 1:
                     continue
-                req_id = req_ids_output_copy[req_idx]
                 req_state = self.requests[req_id]
+                if req_state.soft_thinking_active:
+                    close_id = int(req_state.soft_thinking_think_close_token_id)
+                    num_internal_tokens = (
+                        len(req_state.soft_thinking_internal_positions)
+                        if req_state.soft_thinking_internal_positions is not None
+                        else 0
+                    )
+                    if (
+                        req_state.soft_thinking_max_internal_tokens >= 0
+                        and num_internal_tokens
+                        >= req_state.soft_thinking_max_internal_tokens
+                    ):
+                        req_state.soft_thinking_active = False
+                        valid_sampled_token_ids[req_idx] = [close_id]
+                        continue
+                    if logits is None:
+                        req_state.soft_thinking_active = False
+                        continue
+
+                    token_id, entropy, soft_embed = (
+                        self._compute_soft_thinking_next_embed(
+                            logits_row=logits[req_idx],
+                            entropy_threshold=(
+                                req_state.soft_thinking_entropy_threshold
+                            ),
+                            temperature=req_state.soft_thinking_temperature,
+                            top_k=req_state.soft_thinking_top_k,
+                            top_p=req_state.soft_thinking_top_p,
+                        )
+                    )
+                    if (
+                        token_id == close_id
+                        or entropy < req_state.soft_thinking_entropy_threshold
+                    ):
+                        req_state.soft_thinking_active = False
+                        valid_sampled_token_ids[req_idx] = [close_id]
+                        continue
+
+                    start_idx = int(self.input_batch.num_tokens_no_spec[req_idx])
+                    self.latent_qwen35_embeds_by_req_pos[(req_id, start_idx)] = (
+                        soft_embed
+                    )
+                    internal_sampled_token_ids[req_idx] = [token_id]
+                    valid_sampled_token_ids[req_idx] = []
+                    continue
                 if not req_state.latent_qwen35_active:
                     continue
                 token_id = int(sampled_ids[0])
-                if token_id == int(req_state.latent_qwen35_think_close_token_id):
-                    req_state.latent_qwen35_active = False
-                    continue
+                close_id = int(req_state.latent_qwen35_think_close_token_id)
+                start_idx = int(self.input_batch.num_tokens_no_spec[req_idx])
                 num_internal_tokens = (
                     len(req_state.latent_qwen35_internal_positions)
                     if req_state.latent_qwen35_internal_positions is not None
                     else 0
                 )
+                if token_id == close_id:
+                    req_state.latent_qwen35_active = False
+                    continue
                 if (
                     req_state.latent_qwen35_max_internal_tokens >= 0
                     and num_internal_tokens
@@ -4419,45 +5243,59 @@ class GPUModelRunner(
                 ):
                     req_state.latent_qwen35_active = False
                     continue
-                start_idx = int(self.input_batch.num_tokens_no_spec[req_idx])
+                if token_id == req_state.latent_qwen35_last_internal_token_id:
+                    req_state.latent_qwen35_repeat_count += 1
+                else:
+                    req_state.latent_qwen35_last_internal_token_id = token_id
+                    req_state.latent_qwen35_repeat_count = 1
+                if (
+                    req_state.latent_qwen35_repeat_close_threshold > 0
+                    and req_state.latent_qwen35_repeat_count
+                    >= req_state.latent_qwen35_repeat_close_threshold
+                ):
+                    req_state.latent_qwen35_active = False
+                    req_state.latent_qwen35_last_internal_token_id = -1
+                    req_state.latent_qwen35_repeat_count = 0
+                    valid_sampled_token_ids[req_idx] = [close_id]
+                    continue
                 segment_start_pos = int(
                     self.input_batch.num_computed_tokens_cpu[req_idx]
-                )
-                scheduled_len = int(
-                    scheduler_output.num_scheduled_tokens.get(req_id, 0)
                 )
                 prefill_len = min(
                     scheduled_len, max(0, start_idx - segment_start_pos)
                 )
                 if prefill_len > 0:
-                    hidden_offset = hidden_offsets[req_idx]
                     if self.latent_qwen35_native_head is None:
                         if not self._advance_latent_qwen35_mtp_cache(
                             req_id=req_id,
                             req_idx=req_idx,
                             input_ids=self.input_ids.gpu[
-                                hidden_offset : hidden_offset + prefill_len
+                                current_hidden_offset : current_hidden_offset
+                                + prefill_len
                             ],
                             hidden_states=hidden_states[
-                                hidden_offset : hidden_offset + prefill_len
+                                current_hidden_offset : current_hidden_offset
+                                + prefill_len
                             ],
                             start_pos=segment_start_pos,
                         ):
                             continue
-                checkpoint = self._get_latent_qwen35_checkpoint(
-                    req_state.sampling_params
-                )
-                if (
-                    checkpoint is not None
-                    and self._ensure_latent_qwen35_native_head(
-                        req_state.sampling_params
-                    )
-                    is not None
-                ):
+                checkpoint = req_state.latent_qwen35_checkpoint
+                native_head = None
+                if checkpoint is not None:
+                    if loaded_native_checkpoint == checkpoint:
+                        native_head = self.latent_qwen35_native_head
+                    else:
+                        native_head = (
+                            self._ensure_latent_qwen35_native_head_for_checkpoint(
+                                checkpoint
+                            )
+                        )
+                        loaded_native_checkpoint = self.latent_qwen35_native_checkpoint
+                if native_head is not None:
                     if self.latent_qwen35_pending_req_ids[req_idx] is None:
                         self.latent_qwen35_num_pending += 1
                     self.latent_qwen35_pending_req_ids[req_idx] = req_id
-                    self.latent_qwen35_pending_token_ids_np[req_idx] = token_id
                     self.latent_qwen35_pending_positions_np[req_idx] = start_idx
                     self.latent_qwen35_pending_hidden.gpu[req_idx].copy_(
                         sample_hidden_states[req_idx],
@@ -4513,11 +5351,20 @@ class GPUModelRunner(
             req_id = req_ids[req_idx]
             req_state = self.requests[req_id]
             if internal_sampled_token_ids[req_idx]:
-                if req_state.latent_qwen35_internal_positions is None:
-                    req_state.latent_qwen35_internal_positions = set()
-                req_state.latent_qwen35_internal_positions.update(
-                    range(start_idx, end_idx)
-                )
+                if req_state.soft_thinking_active or (
+                    req_state.soft_thinking_internal_positions is not None
+                ):
+                    if req_state.soft_thinking_internal_positions is None:
+                        req_state.soft_thinking_internal_positions = set()
+                    req_state.soft_thinking_internal_positions.update(
+                        range(start_idx, end_idx)
+                    )
+                else:
+                    if req_state.latent_qwen35_internal_positions is None:
+                        req_state.latent_qwen35_internal_positions = set()
+                    req_state.latent_qwen35_internal_positions.update(
+                        range(start_idx, end_idx)
+                    )
             req_state.output_token_ids.extend(sampled_ids)
 
         # Compute prompt logprobs if needed.
@@ -4593,7 +5440,7 @@ class GPUModelRunner(
         Returns:
             Model output tensor
         """
-        profile_path = os.getenv("LATENT_QWEN35_PHASE_PROFILE_JSONL")
+        profile_path = self.latent_qwen35_phase_profile_path
         start_event = end_event = None
         if profile_path:
             start_event = torch.cuda.Event(enable_timing=True)
@@ -4617,13 +5464,18 @@ class GPUModelRunner(
                 else 0
             )
             with open(profile_path, "a") as f:
+                input_kind = (
+                    "mixed"
+                    if input_ids is not None and inputs_embeds is not None
+                    else "inputs_embeds"
+                    if inputs_embeds is not None
+                    else "input_ids"
+                )
                 f.write(
                     json.dumps(
                         {
                             "kind": "main_forward",
-                            "input_kind": "inputs_embeds"
-                            if inputs_embeds is not None
-                            else "input_ids",
+                            "input_kind": input_kind,
                             "num_tokens": num_tokens,
                             "latent_inputs_embeds": bool(
                                 self.latent_qwen35_use_inputs_embeds
@@ -6599,10 +7451,14 @@ class GPUModelRunner(
                     **model_kwargs,
                     **self._dummy_mm_kwargs(num_reqs),
                 }
-            elif self.enable_prompt_embeds or self.latent_qwen35_use_inputs_embeds:
-                input_ids = None
+            elif (
+                self.enable_prompt_embeds
+                or self.latent_qwen35_use_inputs_embeds
+                or self.latent_qwen35_capture_inputs_embeds
+            ):
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
                 model_kwargs = self._init_model_kwargs()
+                input_ids = None
             else:
                 input_ids = self.input_ids.gpu[:num_tokens_padded]
                 inputs_embeds = None
